@@ -1,6 +1,5 @@
 # Orbis
 A drone using SLAM to map its surroundings, all controlled using a ROG Ally.
-Or really any Windows device with joysticks.
 
 ## Build
 Build the `orbis` service image:
