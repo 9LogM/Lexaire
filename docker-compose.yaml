@@ -1,5 +1,5 @@
 services:
-  main:
+  orbis:
     build: .
     container_name: "orbis_container"
     devices:
