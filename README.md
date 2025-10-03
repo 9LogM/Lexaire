@@ -1,6 +1,9 @@
 # Orbis
 A drone using SLAM to map its surroundings, all controlled using a ROG Ally.
 
+## NOTE
+**This project has been officially retired. My focus has since shifted toward autonomous vehicles.**
+
 ## Build
 Build the `orbis` service image:
 ```bash
