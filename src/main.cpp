@@ -1,5 +1,3 @@
-#include "monitor.hpp"
-
 #include <iostream>
 #include <memory>
 #include <future>
@@ -12,6 +10,8 @@
 #include <boost/asio.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/bind/bind.hpp>
+
+#include "monitor.hpp"
 
 using namespace mavsdk;
 
@@ -112,15 +112,17 @@ void process_command(AppContext &ctx, const std::string &command) {
 
         switch (choice) {
             case 1:
-                std::cout << "\nNot yet implemented.\n";
-                display_main_menu();
+                ctx.current_state = AppContext::NotMainMenu;
+                std::cout 
+                    << "\n" << std::string(50, '-')
+                    << "\nINSTRUCTIONS:"
+                    << "\n 1. Configure the drone and its joystick controls via QGroundControl."
+                    << "\n 2. Start SLAM pipeline."
+                    << "\n\nPress Enter to return to the main menu."
+                    << "\n" << std::string(50, '-') << "\n> " << std::flush;
                 break;
             case 2:
                 start_monitoring(ctx);
-                break;
-            case 3:
-                std::cout << "\nNot yet implemented.\n";
-                display_main_menu();
                 break;
             default:
                 std::cout << "Invalid choice.\n";
@@ -144,7 +146,6 @@ void display_main_menu() {
         << "\nEnter your selection:\n\n"
         << " 1. Read instructions\n"
         << " 2. Start telemetry monitoring\n"
-        << " 3. Run control tests\n"
         << std::string(60, '_') << "\n> " << std::flush;
 }
 

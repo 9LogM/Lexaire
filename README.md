@@ -1,10 +1,13 @@
 # Orbis
 A drone using SLAM to map its surroundings, all controlled using a ROG Ally.
 
+## NOTE
+**This project has been officially retired. My focus has since shifted toward autonomous vehicles.**
+
 ## Build
-Build the `main` service image:
+Build the `orbis` service image:
 ```bash
-docker compose build main
+docker compose build orbis
 ```
 
 ## Down
@@ -16,7 +19,7 @@ docker compose down --remove-orphans
 ## Run
 Run the main service interactively (removes container after exit):
 ```bash
-docker compose run --rm main
+docker compose run --rm orbis
 ```
 
 ## Prune

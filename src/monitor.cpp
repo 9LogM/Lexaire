@@ -1,9 +1,7 @@
 #include "monitor.hpp"
 
 #include <iostream>
-#include <iomanip>
 
-#include <mavsdk/mavsdk.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
 
 using namespace mavsdk;
@@ -29,7 +27,6 @@ void setup_monitoring(Telemetry &telemetry) {
     });
 
     telemetry.subscribe_battery([](Telemetry::Battery battery) {
-        std::cout << "Battery: " << std::fixed << std::setprecision(1) 
-                  << battery.remaining_percent << " %" << std::endl;
+        std::cout << "Battery: " << battery.remaining_percent << " %" << std::endl;
     });
 }

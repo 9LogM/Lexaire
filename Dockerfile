@@ -1,4 +1,4 @@
-FROM arm64v8/ubuntu:24.04
+FROM arm64v8/debian:12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
