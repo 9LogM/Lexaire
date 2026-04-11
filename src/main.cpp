@@ -173,10 +173,10 @@ static void render(const AppContext& ctx) {
 
         // Power
         attron(A_BOLD); mvprintw(r++, 2, "Power"); attroff(A_BOLD);
-        if (s.battery_pct >= 0)
+        if (s.has_battery)
             mvprintw(r++, 4, "Battery     : %d%%  (%.1f V)", s.battery_pct, s.battery_v);
         else
-            mvprintw(r++, 4, "Battery     : —");
+            mvprintw(r++, 4, "Battery     : N/A");
         r++;
 
         // Position

@@ -32,8 +32,11 @@ void setup_monitoring(Telemetry& telemetry,
     });
 
     telemetry.subscribe_battery([snap, on_update](Telemetry::Battery b) {
-        snap->battery_pct = static_cast<int>(b.remaining_percent);
-        snap->battery_v   = b.voltage_v;
+        snap->has_battery = b.remaining_percent >= 0;
+        if (snap->has_battery) {
+            snap->battery_pct = static_cast<int>(b.remaining_percent);
+            snap->battery_v   = b.voltage_v;
+        }
         on_update();
     });
 

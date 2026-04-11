@@ -8,9 +8,10 @@ namespace mavsdk { class Telemetry; }
 struct TelemetrySnapshot {
     // Status
     bool        armed        = false;
-    std::string flight_mode  = "—";
+    std::string flight_mode  = "N/A";
     // Power
-    int         battery_pct  = -1;
+    bool        has_battery  = false;
+    int         battery_pct  = 0;
     float       battery_v    = 0;
     // Position
     bool        has_fix      = false;
