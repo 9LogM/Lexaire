@@ -1,8 +1,21 @@
 # Orbis
 A drone using SLAM to map its surroundings, all controlled using a ROG Ally.
 
-## NOTE
-**This project has been officially retired. My focus has since shifted toward autonomous vehicles.**
+## Configuration
+Edit `common/config.yaml` before running:
+```yaml
+connection_url: serial:///dev/ttyACM0:57600  # USB path to Pixhawk
+qgc_ip: 192.168.1.x                          # IP of the machine running QGroundControl
+```
+
+## Features
+- **Connect QGroundControl** — bridges MAVLink from the Pixhawk over UDP to QGroundControl on your laptop (port 14550)
+- **Telemetry monitoring** — live flight mode and battery readouts via MAVSDK
+
+## Instructions
+1. Set `qgc_ip` in `common/config.yaml` to your laptop's IP.
+2. Run Orbis and select **1. Connect QGroundControl**.
+3. Open QGroundControl — it will connect automatically over UDP port 14550.
 
 ## Build
 Build the `orbis` service image:

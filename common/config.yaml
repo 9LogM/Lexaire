@@ -1,1 +1,2 @@
-connection_url:
+serial_device: /dev/ttyACM0
+serial_baud: 57600
