@@ -11,8 +11,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-// Boost before ncurses — ncurses defines macros (timeout, clear, move…)
-// that conflict with Boost ASIO if included first
 #include <mavsdk/mavsdk.h>
 #include <mavsdk/system.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
@@ -339,7 +337,7 @@ static void start_qgc_watchdog(AppContext& ctx) {
 
 int main() {
     mavsdk::log::subscribe([](mavsdk::log::Level, const std::string&, const std::string&, int) {
-        return true; // suppress all MAVSDK output — ncurses owns the terminal
+        return true;
     });
 
     auto config = try_load_config();
@@ -355,7 +353,6 @@ int main() {
         return -1;
     }
 
-    // Wait for drone (before ncurses so we can print normally)
     std::cout << "Waiting for drone..." << std::flush;
     auto prom = std::make_shared<std::promise<std::shared_ptr<System>>>();
     auto fut = prom->get_future();
@@ -368,7 +365,6 @@ int main() {
     std::shared_ptr<System> system{fut.get()};
     std::cout << " connected.\n" << std::flush;
 
-    // Init ncurses
     initscr();
     cbreak();
     noecho();
@@ -377,8 +373,8 @@ int main() {
     curs_set(1);
     start_color();
     use_default_colors();
-    init_pair(1, COLOR_GREEN,  -1);  // QGC connected
-    init_pair(2, COLOR_YELLOW, -1);  // QGC waiting
+    init_pair(1, COLOR_GREEN,  -1);
+    init_pair(2, COLOR_YELLOW, -1);
 
     AppContext ctx(sdk, system);
 
