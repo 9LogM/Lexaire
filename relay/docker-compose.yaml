@@ -5,7 +5,7 @@ services:
     network_mode: host
     restart: unless-stopped
     devices:
-      - /dev/ttyACM0:/dev/ttyACM0
+      - ${SERIAL_DEVICE}:${SERIAL_DEVICE}
     environment:
-      - SERIAL_DEVICE=/dev/ttyACM0
-      - SERIAL_BAUD=57600
+      - SERIAL_DEVICE=${SERIAL_DEVICE}
+      - SERIAL_BAUD=${SERIAL_BAUD}

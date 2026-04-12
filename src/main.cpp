@@ -2,7 +2,6 @@
 #include <fstream>
 #include <sstream>
 #include <memory>
-#include <future>
 #include <atomic>
 #include <chrono>
 #include <map>
@@ -99,6 +98,8 @@ struct AppContext {
     std::string  input_line;
     std::string  sub_content;
     std::string  drone_host;
+    std::string  serial_device;
+    int          serial_baud   = 0;
     std::shared_ptr<TelemetrySnapshot> telemetry_snap = std::make_shared<TelemetrySnapshot>();
 
     AppContext(Mavsdk& sdk, std::shared_ptr<System> system)
@@ -267,7 +268,9 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                     break;
                 }
                 bool stopping = ctx.relay_active;
-                std::string cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
+                std::string shell_cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
+                    " SERIAL_DEVICE=" + ctx.serial_device +
+                    " SERIAL_BAUD=" + std::to_string(ctx.serial_baud) +
                     (stopping
                         ? " docker compose -f relay/docker-compose.yaml down"
                         : " docker compose -f relay/docker-compose.yaml up -d --build") +
@@ -288,18 +291,17 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                         ctx.sub_content += "\n\n  Press Enter to return.";
                         render(ctx);
                     },
-                    boost::process::shell, cmd
+                    boost::process::shell, shell_cmd
                 );
                 break;
             }
             case 2: {
                 std::string host = ctx.drone_host.empty() ? get_local_ip() : ctx.drone_host.substr(ctx.drone_host.find('@') != std::string::npos ? ctx.drone_host.find('@') + 1 : 0);
-                std::string ip = host;
                 ctx.sub_content =
                     "  QGROUNDCONTROL SETUP\n\n"
                     "  Connect QGC:\n"
                     "    Comm Links -> Add -> UDP\n"
-                    "    Server address : " + ip + "\n"
+                    "    Server address : " + host + "\n"
                     "    Port           : 14550\n\n"
                     "  Press Enter to return.";
                 ctx.state = State::SubMenu;
@@ -430,8 +432,8 @@ int main() {
     });
 
     auto config = try_load_config();
-    const std::string serial_device = config.count("serial_device") ? config.at("serial_device") : "/dev/ttyACM0";
-    const int         serial_baud   = config.count("serial_baud")   ? std::stoi(config.at("serial_baud")) : 57600;
+    const std::string serial_device = config.count("serial_device") ? config.at("serial_device") : "";
+    const int         serial_baud   = config.count("serial_baud")   ? std::stoi(config.at("serial_baud")) : 0;
     const std::string drone_host    = config.count("drone_host")    ? config.at("drone_host") : "";
     const std::string drone_hostname = drone_host.find('@') != std::string::npos
         ? drone_host.substr(drone_host.find('@') + 1)
@@ -467,7 +469,9 @@ int main() {
     init_pair(3, COLOR_RED,    -1);
 
     AppContext ctx(sdk, system);
-    ctx.drone_host = drone_host;
+    ctx.drone_host    = drone_host;
+    ctx.serial_device = serial_device;
+    ctx.serial_baud   = serial_baud;
 
     ctx.signals.async_wait([&ctx](const boost::system::error_code&, int) {
         endwin();

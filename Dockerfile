@@ -28,7 +28,7 @@ COPY . .
 
 RUN mkdir build && cd build && \
     cmake .. && \
-    make
+    make -j"$(nproc)"
 
 RUN chmod +x /workspace/docker-entrypoint.sh
 

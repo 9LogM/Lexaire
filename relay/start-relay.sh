@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-SERIAL_DEVICE="${SERIAL_DEVICE:-/dev/ttyACM0}"
-SERIAL_BAUD="${SERIAL_BAUD:-57600}"
+SERIAL_DEVICE="${SERIAL_DEVICE}"
+SERIAL_BAUD="${SERIAL_BAUD}"
 CONFIG="/tmp/orbis-mlr.conf"
 
 cat > "$CONFIG" <<EOF
