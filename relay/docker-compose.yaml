@@ -1,0 +1,11 @@
+services:
+  relay:
+    build: .
+    container_name: orbis-relay
+    network_mode: host
+    restart: unless-stopped
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    environment:
+      - SERIAL_DEVICE=/dev/ttyACM0
+      - SERIAL_BAUD=57600
