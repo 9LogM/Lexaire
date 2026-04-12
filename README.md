@@ -33,6 +33,15 @@ serial_baud: 57600                # baud rate of the serial connection
 drone_host: user@companion.local  # SSH connection to companion computer
 ```
 
+### SSH key setup
+
+Orbis deploys the relay over SSH. Run once from the ground station:
+
+```bash
+ssh-keygen -t ed25519 -C "orbis"   # skip if you already have a key
+ssh-copy-id user@companion.local   # use the drone_host value from config.yaml
+```
+
 ### Build
 
 ```bash

@@ -5,3 +5,4 @@ services:
     network_mode: host
     volumes:
       - ./common:/workspace/common:ro
+      - ~/.ssh:/mnt/ssh:ro

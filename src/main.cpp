@@ -94,6 +94,7 @@ struct AppContext {
 
     State        state         = State::MainMenu;
     bool         qgc_connected = false;
+    int          qgc_miss_count = 0;
     bool         relay_active  = false;
     std::string  input_line;
     std::string  sub_content;
@@ -121,7 +122,7 @@ static void draw_header(const AppContext& ctx) {
     mvprintw(1, 2, "ORBIS");
 
     std::string qgc_label  = "QGC: ";
-    std::string qgc_status = ctx.qgc_connected ? "Connected" : "Waiting...";
+    std::string qgc_status = ctx.qgc_connected ? "Connected" : "Disconnected";
 
     int right = cols - (int)(qgc_label.size() + qgc_status.size()) - 2;
     mvprintw(1, right, "%s", qgc_label.c_str());
@@ -269,20 +270,26 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 std::string cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
                     (stopping
                         ? " docker compose -f relay/docker-compose.yaml down"
-                        : " docker compose -f relay/docker-compose.yaml up -d --build");
+                        : " docker compose -f relay/docker-compose.yaml up -d --build") +
+                    " >/dev/null 2>&1";
                 ctx.sub_content = stopping
                     ? "  STOP RELAY\n\n  Stopping...\n\n"
-                    : "  START RELAY\n\n  Deploying — this may take a few minutes on first run...\n\n";
+                    : "  START RELAY\n\n  Deploying - this may take a few minutes on first run...\n\n";
                 ctx.state = State::SubMenu;
                 render(ctx);
-                int rc = std::system(cmd.c_str());
-                if (rc == 0) ctx.relay_active = !stopping;
-                ctx.sub_content += rc == 0
-                    ? (stopping ? "  Relay stopped." : "  Relay running.")
-                    : "  Failed (exit " + std::to_string(rc) + ").\n"
-                      "  Ensure companion computer has Docker running and SSH key is configured.";
-                ctx.sub_content += "\n\n  Press Enter to return.";
-                render(ctx);
+                boost::process::async_system(
+                    ctx.io,
+                    [&ctx, stopping](boost::system::error_code, int rc) {
+                        if (rc == 0) ctx.relay_active = !stopping;
+                        ctx.sub_content += rc == 0
+                            ? (stopping ? "  Relay stopped." : "  Relay running.")
+                            : "  Failed (exit " + std::to_string(rc) + ").\n"
+                              "  Ensure companion computer has Docker running and SSH key is configured.";
+                        ctx.sub_content += "\n\n  Press Enter to return.";
+                        render(ctx);
+                    },
+                    boost::process::shell, cmd
+                );
                 break;
             }
             case 2: {
@@ -300,6 +307,15 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 3: {
+                if (!ctx.system) {
+                    ctx.sub_content =
+                        "  LIVE TELEMETRY\n\n"
+                        "  No drone connected yet.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
+                }
                 ctx.state = State::Monitoring;
                 ctx.telemetry_snap = std::make_shared<TelemetrySnapshot>();
                 ctx.telemetry_plugin = std::make_unique<Telemetry>(ctx.system);
@@ -391,8 +407,14 @@ static void start_qgc_watchdog(AppContext& ctx) {
             if (!sys->has_autopilot() && sys->is_connected()) { found = true; break; }
         }
 
-        if (found != ctx.qgc_connected) {
-            ctx.qgc_connected = found;
+        if (found) {
+            ctx.qgc_miss_count = 0;
+            if (!ctx.qgc_connected) {
+                ctx.qgc_connected = true;
+                request_render(ctx);
+            }
+        } else if (++ctx.qgc_miss_count >= 3 && ctx.qgc_connected) {
+            ctx.qgc_connected = false;
             request_render(ctx);
         }
 
@@ -430,17 +452,7 @@ int main() {
         return -1;
     }
 
-    std::cout << "Waiting for drone..." << std::flush;
-    auto prom = std::make_shared<std::promise<std::shared_ptr<System>>>();
-    auto fut = prom->get_future();
-    auto promise_set = std::make_shared<std::atomic<bool>>(false);
-    sdk.subscribe_on_new_system([&sdk, prom, promise_set]() {
-        for (auto& sys : sdk.systems())
-            if (sys->has_autopilot() && !promise_set->exchange(true))
-                prom->set_value(sys);
-    });
-    std::shared_ptr<System> system{fut.get()};
-    std::cout << " connected.\n" << std::flush;
+    std::shared_ptr<System> system = nullptr;
 
     initscr();
     cbreak();
@@ -460,6 +472,18 @@ int main() {
     ctx.signals.async_wait([&ctx](const boost::system::error_code&, int) {
         endwin();
         ctx.io.stop();
+    });
+
+    auto autopilot_found = std::make_shared<std::atomic<bool>>(false);
+    sdk.subscribe_on_new_system([&sdk, &ctx, autopilot_found]() {
+        for (auto& sys : sdk.systems()) {
+            if (sys->has_autopilot() && !autopilot_found->exchange(true)) {
+                boost::asio::post(ctx.io, [&ctx, sys]() {
+                    ctx.system = sys;
+                    request_render(ctx);
+                });
+            }
+        }
     });
 
     check_relay_once(ctx);
