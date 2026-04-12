@@ -83,7 +83,6 @@ struct AppContext {
     boost::asio::io_context      io;
     boost::asio::signal_set      signals;
     boost::asio::steady_timer    input_timer;
-    boost::asio::steady_timer    qgc_watchdog;
     boost::asio::steady_timer    render_timer;
     bool                         render_dirty = false;
 
@@ -93,7 +92,6 @@ struct AppContext {
 
     State        state         = State::MainMenu;
     bool         qgc_connected = false;
-    int          qgc_miss_count = 0;
     bool         relay_active  = false;
     std::string  input_line;
     std::string  sub_content;
@@ -105,7 +103,6 @@ struct AppContext {
     AppContext(Mavsdk& sdk, std::shared_ptr<System> system)
         : signals(io, SIGINT)
         , input_timer(io)
-        , qgc_watchdog(io)
         , render_timer(io)
         , sdk(sdk)
         , system(system) {}
@@ -135,7 +132,7 @@ static void draw_header(const AppContext& ctx) {
     if (!ctx.drone_host.empty()) {
         bool heartbeat = ctx.system && ctx.system->is_connected();
         std::string relay_label  = "Relay: ";
-        std::string relay_status = !ctx.relay_active    ? "Stopped"
+        std::string relay_status = !ctx.relay_active    ? "Inactive"
                                  : heartbeat            ? "Active"
                                                         : "No Heartbeat";
         int relay_col = right - (int)(relay_label.size() + relay_status.size()) - 3;
@@ -309,10 +306,10 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 3: {
-                if (!ctx.system) {
+                if (!ctx.system || !ctx.system->is_connected()) {
                     ctx.sub_content =
                         "  LIVE TELEMETRY\n\n"
-                        "  No drone connected yet.\n\n"
+                        "  No drone connected.\n\n"
                         "  Press Enter to return.";
                     ctx.state = State::SubMenu;
                     render(ctx);
@@ -328,6 +325,19 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                         boost::asio::post(ctx.io, [&ctx]() { request_render(ctx); });
                     }
                 );
+                ctx.system->subscribe_is_connected([&ctx](bool connected) {
+                    boost::asio::post(ctx.io, [&ctx, connected]() {
+                        if (!connected && ctx.state == State::Monitoring) {
+                            ctx.telemetry_plugin = nullptr;
+                            ctx.sub_content =
+                                "  LIVE TELEMETRY\n\n"
+                                "  Connection lost.\n\n"
+                                "  Press Enter to return.";
+                            ctx.state = State::SubMenu;
+                            request_render(ctx);
+                        }
+                    });
+                });
                 render(ctx);
                 break;
             }
@@ -397,33 +407,6 @@ static void check_relay_once(AppContext& ctx) {
     );
 }
 
-// ── QGC watchdog ──────────────────────────────────────────────────────────────
-
-static void start_qgc_watchdog(AppContext& ctx) {
-    ctx.qgc_watchdog.expires_after(std::chrono::seconds(1));
-    ctx.qgc_watchdog.async_wait([&ctx](const boost::system::error_code& ec) {
-        if (ec || ctx.io.stopped()) return;
-
-        bool found = false;
-        for (auto& sys : ctx.sdk.systems()) {
-            if (!sys->has_autopilot() && sys->is_connected()) { found = true; break; }
-        }
-
-        if (found) {
-            ctx.qgc_miss_count = 0;
-            if (!ctx.qgc_connected) {
-                ctx.qgc_connected = true;
-                request_render(ctx);
-            }
-        } else if (++ctx.qgc_miss_count >= 3 && ctx.qgc_connected) {
-            ctx.qgc_connected = false;
-            request_render(ctx);
-        }
-
-        start_qgc_watchdog(ctx);
-    });
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -479,12 +462,22 @@ int main() {
     });
 
     auto autopilot_found = std::make_shared<std::atomic<bool>>(false);
-    sdk.subscribe_on_new_system([&sdk, &ctx, autopilot_found]() {
+    auto qgc_found = std::make_shared<std::atomic<bool>>(false);
+    sdk.subscribe_on_new_system([&sdk, &ctx, autopilot_found, qgc_found]() {
         for (auto& sys : sdk.systems()) {
             if (sys->has_autopilot() && !autopilot_found->exchange(true)) {
                 boost::asio::post(ctx.io, [&ctx, sys]() {
                     ctx.system = sys;
                     request_render(ctx);
+                });
+            }
+            if (!sys->has_autopilot() && !qgc_found->exchange(true)) {
+                sys->subscribe_is_connected([&ctx, qgc_found](bool connected) {
+                    boost::asio::post(ctx.io, [&ctx, connected, qgc_found]() {
+                        ctx.qgc_connected = connected;
+                        if (!connected) qgc_found->store(false);
+                        request_render(ctx);
+                    });
                 });
             }
         }
@@ -493,7 +486,6 @@ int main() {
     check_relay_once(ctx);
     render(ctx);
     start_input_poll(ctx);
-    start_qgc_watchdog(ctx);
     ctx.io.run();
 
     endwin();
