@@ -1,96 +1,80 @@
 # Orbis
-An autonomous drone that maps and navigates its environment using SLAM.
+An autonomous indoor drone that responds to natural language voice commands.
 
 ---
 
-## Requirements
+## Setup
 
-### Hardware
-- **Drone side:** Any ARM64 onboard computer acting as a MAVLink bridge, with any MAVLink-compatible flight controller connected via serial
-- **Ground station:** Any machine capable of running Orbis and QGroundControl, networked to the drone
+### Requirements
 
-### Software
+**Hardware**
+- MAVLink-compatible flight controller
+- Companion computer with serial connection to flight controller
+- Depth sensor
+- Ubuntu x86_64 ground station
+
+**Ground station software**
 - Docker with Compose v2
-- QGroundControl
+- SSH key configured to companion computer
 
----
+**Companion computer software**
+- Docker with Compose v2
+- SSH server enabled
 
-## Configuration
-Edit `common/config.yaml` before building:
+**Optional**
+- QGroundControl *(manual control and parameter tuning during development)*
+
+### Configuration
+
+Edit `common/config.yaml`:
 ```yaml
-serial_device: /dev/ttyACM0  # serial device path to the flight controller
-serial_baud: 57600           # baud rate of the serial connection
+serial_device: /dev/ttyACM0       # serial port to flight controller (companion computer side)
+serial_baud: 57600                # baud rate of the serial connection
+drone_host: user@companion.local  # SSH connection to companion computer
 ```
 
----
+### SSH key setup
 
-## Commands
+Orbis deploys the relay over SSH. Run once from the ground station:
 
-**Build:**
 ```bash
-docker compose build orbis
+ssh-keygen -t ed25519 -C "orbis"   # skip if you already have a key
+ssh-copy-id user@companion.local   # use the drone_host value from config.yaml
 ```
 
-**Run** (interactive, removed on exit):
+### Build
+
+```bash
+docker compose build
+```
+
+### Deploy relay
+
+On first run, deploy the MAVLink relay to the companion computer from the Orbis menu:
+
+```
+1. Start relay
+```
+
+This uses Docker's remote daemon over SSH. After the first deploy, the relay auto-starts on every reboot.
+
+### Run
+
 ```bash
 docker compose run --rm orbis
 ```
 
-**Stop and remove containers:**
-```bash
-docker compose down --remove-orphans
-```
-
-**Nuke all unused Docker resources:**
-```bash
-docker system prune -a --volumes
-```
-
-**Force-kill all running containers:**
-```bash
-docker kill $(docker ps -q)
-```
-
----
-
-## QGroundControl
-
-1. Make sure Orbis is running on the ground station and the drone is powered on.
-2. In QGroundControl: **Application Settings → Comm Links → Add → UDP**.
-3. Set the server address to the drone-side bridge computer's IP and port **14550**.
-4. Click Connect — QGC will link up and the header bar in Orbis will turn green.
-
 ---
 
 ## Architecture
-
-> This section documents how the system is built. It will grow as the project expands.
-
-### Stack
-
-| Component | Version | Role |
-|---|---|---|
-| Debian slim | 12 (Bookworm) | Base Docker image (`arm64v8`) |
-| MAVSDK | 3.17.0 | High-level MAVLink SDK — telemetry, commands |
-| mavlink-router | v4 | Low-level MAVLink packet forwarder |
-| Boost.Asio | system | Async event loop, timers, signal handling |
-| ncurses | system | Terminal UI |
-
----
-
-### MAVLink routing
-
-The flight controller speaks MAVLink over a serial connection. Two consumers need that stream simultaneously — MAVSDK (for telemetry and control) and QGroundControl (for full ground station visibility). A single serial port can only be opened once, so **mavlink-router** acts as a transparent byte-level forwarder.
-
-The Pi runs only mavlink-router — it is a dumb MAVLink bridge. All application logic (Orbis, QGC, and eventually SLAM) runs on the ground station.
 
 ```
 [ Drone ]
   Flight controller
         │ serial
         ▼
-  Pi — mavlink-router
-        │ UDP (network)
+  Companion computer — mavlink-router (relay container)
+        │ UDP over WiFi
         ▼
 [ Ground station ]
   ┌─────┴──────┐
@@ -99,11 +83,28 @@ The Pi runs only mavlink-router — it is a dumb MAVLink bridge. All application
  QGC         MAVSDK (Orbis)
 ```
 
----
+The companion computer is a dumb MAVLink bridge. All logic — telemetry, commands, SLAM, AI — runs on the ground station.
 
-### MAVSDK
+### Stack
 
-MAVSDK connects to mavlink-router's output on `udpin://0.0.0.0:14551`. It is configured as a `CompanionComputer` (not a GCS), which keeps it from interfering with QGC's GCS role.
+| Component | Version | Runs on | Role |
+|---|---|---|---|
+| Debian slim | 13 (Trixie) | Ground station (amd64) | Base image for Orbis |
+| Debian slim | 13 (Trixie) | Companion computer (native arch) | Base image for relay |
+| MAVSDK | 3.17.0 | Ground station | High-level MAVLink SDK |
+| mavlink-router | v4 | Companion computer | MAVLink packet forwarder |
+| Boost.Asio | system | Ground station | Async event loop |
+| ncurses | system | Ground station | Terminal UI |
+
+### Relay deployment
+
+The `relay/` directory contains the relay's Dockerfile and entrypoint. When you select **Start relay** in the Orbis menu, it runs:
+
+```bash
+DOCKER_HOST=ssh://<drone_host> docker compose -f relay/docker-compose.yaml up -d --build
+```
+
+Docker streams the `relay/` build context over SSH to the companion computer's daemon, which builds and starts the container natively. The companion computer never needs the repo cloned. `restart: unless-stopped` keeps the relay running across reboots.
 
 ---
 

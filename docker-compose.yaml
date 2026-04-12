@@ -1,7 +1,8 @@
 services:
   orbis:
     build: .
-    container_name: "orbis_container"
+    container_name: orbis
     network_mode: host
-    devices:
-      - "/dev/ttyACM0:/dev/ttyACM0"
+    volumes:
+      - ./common:/workspace/common:ro
+      - ~/.ssh:/mnt/ssh:ro
