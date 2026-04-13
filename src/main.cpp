@@ -6,9 +6,6 @@
 #include <chrono>
 #include <map>
 #include <string>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #include <mavsdk/mavsdk.h>
 #include <mavsdk/system.h>
@@ -20,7 +17,6 @@
 #include <ncurses.h>
 
 #include "monitor.hpp"
-#include "qgc_bridge.hpp"
 
 using namespace mavsdk;
 
@@ -57,22 +53,6 @@ static std::map<std::string, std::string> try_load_config() {
         if (!c.empty()) return c;
     }
     return {};
-}
-
-static std::string get_local_ip() {
-    struct ifaddrs* ifaddr;
-    if (getifaddrs(&ifaddr) == -1) return "unknown";
-    std::string result = "unknown";
-    for (auto* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
-        if (std::string(ifa->ifa_name) == "lo") continue;
-        char buf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(ifa->ifa_addr)->sin_addr, buf, sizeof(buf));
-        result = buf;
-        break;
-    }
-    freeifaddrs(ifaddr);
-    return result;
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -117,7 +97,7 @@ static void draw_header(const AppContext& ctx) {
     mvhline(0, 0, '=', cols);
     attroff(A_BOLD);
 
-    mvprintw(1, 2, "ORBIS");
+    mvprintw(1, 2, "LEXAIRE");
 
     std::string qgc_label  = "QGC: ";
     std::string qgc_status = ctx.qgc_connected ? "Connected" : "Disconnected";
@@ -129,20 +109,18 @@ static void draw_header(const AppContext& ctx) {
     printw("%s", qgc_status.c_str());
     attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | A_BOLD);
 
-    if (!ctx.drone_host.empty()) {
-        bool heartbeat = ctx.system && ctx.system->is_connected();
-        std::string relay_label  = "Relay: ";
-        std::string relay_status = !ctx.relay_active    ? "Inactive"
-                                 : heartbeat            ? "Active"
-                                                        : "No Heartbeat";
-        int relay_col = right - (int)(relay_label.size() + relay_status.size()) - 3;
-        mvprintw(1, relay_col, "%s", relay_label.c_str());
-        if (!ctx.relay_active)       attron(COLOR_PAIR(2));
-        else if (heartbeat)          attron(COLOR_PAIR(1) | A_BOLD);
-        else                         attron(COLOR_PAIR(3) | A_BOLD);
-        printw("%s", relay_status.c_str());
-        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | A_BOLD);
-    }
+    bool heartbeat = ctx.system && ctx.system->is_connected();
+    std::string relay_label  = "Relay: ";
+    std::string relay_status = !ctx.relay_active    ? "Inactive"
+                             : heartbeat            ? "Active"
+                                                    : "No Heartbeat";
+    int relay_col = right - (int)(relay_label.size() + relay_status.size()) - 3;
+    mvprintw(1, relay_col, "%s", relay_label.c_str());
+    if (!ctx.relay_active)       attron(COLOR_PAIR(2));
+    else if (heartbeat)          attron(COLOR_PAIR(1) | A_BOLD);
+    else                         attron(COLOR_PAIR(3) | A_BOLD);
+    printw("%s", relay_status.c_str());
+    attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | A_BOLD);
 
     attron(A_BOLD);
     mvhline(2, 0, '=', cols);
@@ -255,15 +233,6 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
 
         switch (choice) {
             case 1: {
-                if (ctx.drone_host.empty()) {
-                    ctx.sub_content =
-                        "  RELAY\n\n"
-                        "  drone_host not set in config.yaml.\n\n"
-                        "  Press Enter to return.";
-                    ctx.state = State::SubMenu;
-                    render(ctx);
-                    break;
-                }
                 bool stopping = ctx.relay_active;
                 std::string shell_cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
                     " SERIAL_DEVICE=" + ctx.serial_device +
@@ -293,7 +262,7 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 2: {
-                std::string host = ctx.drone_host.empty() ? get_local_ip() : ctx.drone_host.substr(ctx.drone_host.find('@') != std::string::npos ? ctx.drone_host.find('@') + 1 : 0);
+                std::string host = ctx.drone_host.substr(ctx.drone_host.find('@') + 1);
                 ctx.sub_content =
                     "  QGROUNDCONTROL SETUP\n\n"
                     "  Connect QGC:\n"
@@ -394,9 +363,8 @@ static void start_input_poll(AppContext& ctx) {
 // ── Relay status (one-shot on startup) ───────────────────────────────────────
 
 static void check_relay_once(AppContext& ctx) {
-    if (ctx.drone_host.empty()) return;
     std::string cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
-        " docker ps -q --filter name=orbis-relay | grep -q .";
+        " docker ps -q --filter name=lexaire-relay | grep -q .";
     boost::process::async_system(
         ctx.io,
         [&ctx](boost::system::error_code, int exit_code) {
@@ -415,21 +383,12 @@ int main() {
     });
 
     auto config = try_load_config();
-    const std::string serial_device = config.count("serial_device") ? config.at("serial_device") : "";
-    const int         serial_baud   = config.count("serial_baud")   ? std::stoi(config.at("serial_baud")) : 0;
-    const std::string drone_host    = config.count("drone_host")    ? config.at("drone_host") : "";
-    const std::string drone_hostname = drone_host.find('@') != std::string::npos
-        ? drone_host.substr(drone_host.find('@') + 1)
-        : drone_host;
+    const std::string serial_device = config.at("serial_device");
+    const int         serial_baud   = std::stoi(config.at("serial_baud"));
+    const std::string drone_host    = config.at("drone_host");
+    const std::string drone_hostname = drone_host.substr(drone_host.find('@') + 1);
 
-    if (drone_host.empty()) {
-        if (start_mavlink_router(serial_device, serial_baud) < 0)
-            std::cerr << "Warning: MAVLink router failed to start.\n";
-    }
-
-    const std::string connection = drone_host.empty()
-        ? "udpin://0.0.0.0:14551"
-        : "udpout://" + drone_hostname + ":14551";
+    const std::string connection = "udpout://" + drone_hostname + ":14551";
 
     Mavsdk sdk{Mavsdk::Configuration{ComponentType::CompanionComputer}};
     if (sdk.add_any_connection(connection) != ConnectionResult::Success) {
@@ -472,6 +431,10 @@ int main() {
                 });
             }
             if (!sys->has_autopilot() && !qgc_found->exchange(true)) {
+                boost::asio::post(ctx.io, [&ctx]() {
+                    ctx.qgc_connected = true;
+                    request_render(ctx);
+                });
                 sys->subscribe_is_connected([&ctx, qgc_found](bool connected) {
                     boost::asio::post(ctx.io, [&ctx, connected, qgc_found]() {
                         ctx.qgc_connected = connected;

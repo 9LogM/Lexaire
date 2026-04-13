@@ -1,8 +1,6 @@
 #!/bin/bash
 set -e
 
-# SSH files mounted from Windows have incorrect permissions.
-# Copy to a fresh directory with correct Unix permissions before the SSH client sees them.
 if [ -d /mnt/ssh ]; then
     mkdir -p /root/.ssh
     cp -r /mnt/ssh/. /root/.ssh/
@@ -11,4 +9,4 @@ if [ -d /mnt/ssh ]; then
     find /root/.ssh -name "*.pub" -exec chmod 644 {} \;
 fi
 
-exec /workspace/build/orbis "$@"
+exec /workspace/build/lexaire "$@"

@@ -1,5 +1,5 @@
-# Orbis
-An autonomous indoor drone that responds to natural language voice commands.
+# Lexaire
+Natural Language Control and Autonomy for Drone Systems.
 
 ---
 
@@ -35,10 +35,10 @@ drone_host: user@companion.local  # SSH connection to companion computer
 
 ### SSH key setup
 
-Orbis deploys the relay over SSH. Run once from the ground station:
+Lexaire deploys the relay over SSH. Run once from the ground station:
 
 ```bash
-ssh-keygen -t ed25519 -C "orbis"   # skip if you already have a key
+ssh-keygen -t ed25519 -C "lexaire"   # skip if you already have a key
 ssh-copy-id user@companion.local   # use the drone_host value from config.yaml
 ```
 
@@ -48,21 +48,21 @@ ssh-copy-id user@companion.local   # use the drone_host value from config.yaml
 docker compose build
 ```
 
+### Run
+
+```bash
+docker compose run --rm lexaire
+```
+
 ### Deploy relay
 
-On first run, deploy the MAVLink relay to the companion computer from the Orbis menu:
+On first run, deploy the MAVLink relay to the companion computer from the Lexaire menu:
 
 ```
 1. Start relay
 ```
 
 This uses Docker's remote daemon over SSH. After the first deploy, the relay auto-starts on every reboot.
-
-### Run
-
-```bash
-docker compose run --rm orbis
-```
 
 ---
 
@@ -80,7 +80,7 @@ docker compose run --rm orbis
   ┌─────┴──────┐
   ▼            ▼
 :14550       :14551
- QGC         MAVSDK (Orbis)
+ QGC         MAVSDK (lexaire)
 ```
 
 The companion computer is a dumb MAVLink bridge. All logic — telemetry, commands, SLAM, AI — runs on the ground station.
@@ -89,7 +89,7 @@ The companion computer is a dumb MAVLink bridge. All logic — telemetry, comman
 
 | Component | Version | Runs on | Role |
 |---|---|---|---|
-| Debian slim | 13 (Trixie) | Ground station (amd64) | Base image for Orbis |
+| Debian slim | 13 (Trixie) | Ground station (amd64) | Base image for Lexaire |
 | Debian slim | 13 (Trixie) | Companion computer (native arch) | Base image for relay |
 | MAVSDK | 3.17.0 | Ground station | High-level MAVLink SDK |
 | mavlink-router | v4 | Companion computer | MAVLink packet forwarder |
@@ -98,7 +98,7 @@ The companion computer is a dumb MAVLink bridge. All logic — telemetry, comman
 
 ### Relay deployment
 
-The `relay/` directory contains the relay's Dockerfile and entrypoint. When you select **Start relay** in the Orbis menu, it runs:
+The `relay/` directory contains the relay's Dockerfile and entrypoint. When you select **Start relay** in the Lexaire menu, it runs:
 
 ```bash
 DOCKER_HOST=ssh://<drone_host> docker compose -f relay/docker-compose.yaml up -d --build
@@ -111,7 +111,7 @@ Docker streams the `relay/` build context over SSH to the companion computer's d
 ## Discussions
 
 Have questions, ideas, or want to follow along? Join the conversation:
-[github.com/9LogM/Orbis/discussions](https://github.com/9LogM/Orbis/discussions)
+[github.com/9LogM/Lexaire/discussions](https://github.com/9LogM/Lexaire/discussions)
 
 ---
 

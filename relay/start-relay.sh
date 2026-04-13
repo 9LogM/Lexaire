@@ -3,7 +3,7 @@ set -e
 
 SERIAL_DEVICE="${SERIAL_DEVICE}"
 SERIAL_BAUD="${SERIAL_BAUD}"
-CONFIG="/tmp/orbis-mlr.conf"
+CONFIG="/tmp/lexaire-mlr.conf"
 
 cat > "$CONFIG" <<EOF
 [General]

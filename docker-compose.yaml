@@ -1,7 +1,7 @@
 services:
-  orbis:
+  lexaire:
     build: .
-    container_name: orbis
+    container_name: lexaire
     network_mode: host
     volumes:
       - ./common:/workspace/common:ro

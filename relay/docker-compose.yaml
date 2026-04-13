@@ -1,7 +1,7 @@
 services:
   relay:
     build: .
-    container_name: orbis-relay
+    container_name: lexaire-relay
     network_mode: host
     restart: unless-stopped
     devices:
