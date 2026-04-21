@@ -1,3 +1,70 @@
-serial_device: /dev/ttyACM0
-serial_baud: 57600
-drone_host: orbis@drone.local
+# Lexaire configuration.
+# Secrets (API keys) live in the gitignored `.env` file and are referenced
+# from this config via `<field>_env: ENVVAR_NAME` pairs.
+
+drone:
+  host:          orbis@drone.local
+  serial_device: /dev/ttyACM0
+  serial_baud:   57600
+  mavsdk_udp:    udpout://drone.local:14551
+  qgc_udp_port:  14550
+
+sensor:
+  repo: ./RS-L515-Docker
+  host: orbis@drone.local
+  channels:
+    rgb:   tcp://drone.local:5555
+    depth: tcp://drone.local:5556
+    imu:   tcp://drone.local:5557
+  framerate_hz: 30
+  resolution:  [640, 480]
+
+perception:
+  backend: vlm                       # vlm | detector
+  tick_hz: 2                         # how often a scene snapshot is generated
+  vlm:
+    provider:   dummy                # dummy | gemini | claude | openai
+    model:      gemini-2.0-flash-exp
+    api_key_env: GEMINI_API_KEY
+    temperature: 0.2
+  detector:
+    model: grounding-dino
+    score_threshold: 0.35
+
+slam:
+  backend:    rtabmap
+  enabled:    false                  # flip on in phase 4
+  map_path:   ./maps
+
+stt:
+  backend:        dummy              # dummy | whisper
+  trigger:        push_to_talk
+  abort_keyword:  abort
+  whisper_model:  small              # only used when backend=whisper
+
+control:
+  tick_hz:      50                   # deterministic inner loop rate
+  llm_tick_hz:  2                    # strategic layer rate
+  flight_mode_on_connect: HOLD       # PX4 mode to settle into at start
+
+safety:
+  max_altitude_m:          5.0
+  geofence_radius_m:       10.0
+  max_velocity_mps:        1.5
+  min_obstacle_distance_m: 0.5
+  require_spoken_arm:      true
+
+services:
+  # PUB endpoints (bound by the service; everyone else SUBs).
+  perception_scene_pub:   tcp://127.0.0.1:6100
+  telemetry_pub:          tcp://127.0.0.1:6101
+  orchestrator_status_pub: tcp://127.0.0.1:6102
+
+  # PULL endpoints (bound by the service; producers PUSH).
+  orchestrator_command_pull: tcp://127.0.0.1:6200
+
+  # REP endpoints (bound by the service; clients REQ).
+  flight_bridge_rep:      tcp://127.0.0.1:6300
+
+logging:
+  level: INFO

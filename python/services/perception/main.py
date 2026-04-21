@@ -1,0 +1,111 @@
+"""
+Perception service.
+
+Subscribes to the sensor streams (RGB, depth, IMU) emitted by the L515
+container on the Pi, throttles to `perception.tick_hz`, runs a detector
+on the latest synchronized frameset, and publishes a SceneHeader message
+on `services.perception_scene_pub`.
+
+The orchestrator subscribes to the scene channel and may independently
+reason on pixels via a VLM. This service exists to provide a cheap,
+always-available scene graph at a stable tick rate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import signal
+import time
+
+from lexaire import logs, transport
+from lexaire.config import load_config
+from lexaire.messages import SceneHeader, encode_header
+from lexaire.subscriber import SensorSubscriber
+
+from .detectors import DetectorInputs, build_detector
+
+
+def cli() -> int:
+    p = argparse.ArgumentParser(description="Lexaire perception service")
+    p.add_argument("--config", help="path to config.yaml")
+    p.add_argument("--once", action="store_true", help="produce one scene then exit (for tests)")
+    args = p.parse_args()
+
+    log = logs.configure("perception")
+    cfg = load_config(args.config)
+
+    tick_hz = float(cfg.get("perception.tick_hz", 2.0))
+    scene_pub_ep = cfg.require("services.perception_scene_pub") if False else cfg.get(
+        "services.perception_scene_pub", "tcp://127.0.0.1:6100"
+    )
+
+    detector = build_detector(cfg)
+
+    sub = SensorSubscriber(
+        rgb_endpoint=cfg.sensor.channels.rgb,
+        depth_endpoint=cfg.sensor.channels.depth,
+        imu_endpoint=cfg.sensor.channels.imu,
+    )
+    pub = transport.pub(scene_pub_ep)
+
+    stop = False
+    def _stop(*_):
+        nonlocal stop
+        stop = True
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    sub.start()
+    log.info("perception up  tick=%.1fHz  scene_pub=%s", tick_hz, scene_pub_ep)
+
+    interval_s = 1.0 / tick_hz
+    last_tick = 0.0
+    latest_fs = None
+
+    try:
+        while not stop:
+            fs = sub.get_nowait()
+            if fs is not None:
+                latest_fs = fs
+
+            now = time.monotonic()
+            if now - last_tick < interval_s:
+                time.sleep(min(interval_s - (now - last_tick), 0.05))
+                continue
+            last_tick = now
+
+            if latest_fs is None:
+                continue
+
+            inp = DetectorInputs(
+                rgb=latest_fs.rgb,
+                depth=latest_fs.depth,
+                depth_scale_m=latest_fs.depth_scale_m,
+                intrinsics=latest_fs.intrinsics,
+            )
+            try:
+                detections = detector.detect(inp)
+            except Exception as e:
+                log.exception("detector error: %s", e)
+                continue
+
+            header = SceneHeader(
+                ts_ns=latest_fs.ts_ns,
+                frame_seq=latest_fs.seq,
+                detections=[dataclasses.asdict(d) for d in detections],
+            )
+            pub.send(encode_header(header))
+            log.debug("scene ts_ns=%d seq=%d n=%d", header.ts_ns, header.frame_seq, len(header.detections))
+
+            if args.once:
+                break
+    finally:
+        sub.stop()
+        pub.close()
+        log.info("perception shutdown")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

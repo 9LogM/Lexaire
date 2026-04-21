@@ -216,3 +216,103 @@ Constraints for this week:
 - **No external message sends** (no PRs, no issues created, no chat platform posts).
 - **Local-only testing.** Build on the Windows dev box, run dummy-mode integration tests.
 - **Commit often and write clear messages.** User will read git log + REPORT.md when back.
+
+---
+
+## 2026-04-20 — Milestone 2: Services landed
+
+Picking up from the orchestrator write. This session closed the remaining
+items from the week plan — the dummy pipeline is now exercisable end-to-end
+without any hardware.
+
+### What landed
+
+**STT stub** (`python/services/stt/main.py`)
+- Three modes: `--once TEXT`, `--from-file PATH`, interactive stdin.
+- PUSHes `VoiceCommand` to the orchestrator's `command_pull` endpoint.
+- Sets `is_abort=True` when the configured abort keyword (default "abort")
+  appears anywhere in the command text — the orchestrator short-circuits on
+  that flag before the VLM is even consulted, so a stuck VLM can't swallow
+  the kill switch.
+- `stt.backend = whisper` raises `NotImplementedError` with a clear message
+  for future-me. Phase-3 upgrade is a backend swap, no service rework.
+
+**Replay harness** (`python/services/replay/`)
+- `record` — SUB the live sensor channels, write a JSONL recording with
+  base64-encoded payloads and a monotonic receiver timestamp per frame. The
+  receiver timestamp is what we use to schedule playback; the sensor's own
+  `ts_ns` stays in the header so downstream consumers can't tell the
+  difference from a live stream.
+- `play` — BIND the sensor channels (with a `--bind-host` rewrite so
+  `tcp://drone.local:5555` → `tcp://0.0.0.0:5555` for local playback) and
+  replay at `--speed` multiplier, optionally looping forever.
+- `synth` — bypass the file entirely: cook up a uniform-gray JPEG, a
+  constant-depth uint16 buffer, and zero-motion IMU; publish at
+  configurable rates. This is what the integration test suite uses when it
+  needs the pipeline to believe a sensor exists.
+- File format is deliberately JSONL with base64 payloads — bloats JPEG ~30%
+  but is dead-simple to inspect, diff, and edit. Phase-1 dev recordings
+  won't be huge.
+
+**Python Dockerfile + extended compose**
+- `python/Dockerfile` — slim Python 3.11, installs `lexaire[gemini,perception]`
+  editable. Build context is repo root so `python/` and `common/` are both
+  visible.
+- `docker-compose.yaml` now spins up the full stack:
+  - `lexaire` (TUI, existing) and `flight-bridge` share one C++ image.
+  - `perception` + `orchestrator` share one Python image (different `command`).
+  - `stt` and `replay` live behind `profiles: ["tools"]` because they're
+    interactive/on-demand — putting them in the default up-set would crash-
+    loop on stdin EOF or collide on sensor ports.
+- All services use `network_mode: host` so the intra-service ZMQ URLs
+  (`tcp://127.0.0.1:6100…6300`) Just Work without bridge-network plumbing.
+- Secrets flow via `env_file: .env` — image stays clean.
+
+**TUI extension** (`include/services_panel.hpp`, `src/services_panel.cpp`,
+`src/main.cpp`)
+- New main-menu option **4. Service status monitor**. Spawns a
+  `ServicesWatcher` background thread that SUBs the three status channels
+  (perception scene, flight-bridge telemetry, orchestrator status) and
+  keeps a mutex-protected snapshot.
+- Panel renders each service with last-seen age (green < 500 ms, yellow
+  ≤ 2 s, red > 2 s or never) plus a one-line summary parsed from the header:
+  detection count+labels for perception, `mode/armed/alt/battery` for
+  telemetry, `state — thought` for the orchestrator.
+- Ages auto-refresh via a 500 ms boost::asio timer that's only armed while
+  the panel is on screen; the lambda captures itself via `weak_ptr` to
+  avoid a shared_ptr cycle.
+- CMake wires libzmq into the `lexaire` target (previously only the
+  flight-bridge linked it).
+
+### Deferred / known gaps
+
+- **Whisper STT, real sensor runtime, real MAVSDK connection.** All three
+  need hardware or user-side setup that can't happen this week.
+- **No real L515 verification.** Publisher is deployed to the Pi on the
+  user's return; all downstream work was designed against the documented
+  wire format, not a live stream.
+- **C++ code only compiles inside the Docker image.** The Windows dev box
+  has neither MAVSDK nor yaml-cpp nor libzmq — `cmake` would fail before
+  the first translation unit. `docker compose build` is the way.
+- **Tests are local-only scaffolding.** A Python test suite lives under
+  `python/tests/` but is gitignored — unit coverage for the library and
+  services plus an integration harness with a fake REP bridge. Written
+  but not executed (no Python / Docker on this dev box), and not part of
+  the tracked deliverable. Treat as a local sketch, not a contract.
+
+### Status snapshot
+
+All 10 items from the original week plan are complete or reasonably stubbed:
+
+| # | Item                         | Status |
+|---|------------------------------|--------|
+| 1 | Common infra                 | done   |
+| 2 | Subscriber library           | done   |
+| 3 | Perception service           | done (dummy detector) |
+| 4 | Flight controller service    | done (dummy mode wired) |
+| 5 | Orchestrator                 | done (dummy + Gemini backends) |
+| 6 | STT stub                     | **done this session** |
+| 7 | TUI extension                | **done this session** |
+| 8 | Safety layer                 | done (both languages) |
+| 9 | Integration test harness     | local-only scaffolding (gitignored) |
+| 10 | Documentation                | done (REPORT.md + service docstrings) |

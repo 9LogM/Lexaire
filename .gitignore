@@ -31,6 +31,9 @@ recordings/
 # Local config overrides
 common/config.local.yaml
 
+# Tests — local-only scaffolding, not tracked
+python/tests/
+
 # RS-L515-Docker is a separate git repository cloned in-place. We don't
 # track it from Lexaire because (a) it has its own upstream at
 # https://github.com/9LogM/RS-L515 and (b) nested-repo-as-gitlink is

@@ -5,8 +5,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG MAVSDK_VERSION=3.17.0
 
 RUN apt-get update && apt-get install -y \
-    wget cmake build-essential \
+    wget cmake build-essential pkg-config \
     libboost-all-dev libncurses-dev \
+    libyaml-cpp-dev libzmq3-dev nlohmann-json3-dev \
     ca-certificates curl gnupg openssh-client \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
