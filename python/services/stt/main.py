@@ -1,18 +1,19 @@
 """
-STT service — phase 1 stub.
+STT service.
 
-Reads text lines from stdin (push-to-talk simulation) and pushes a
-`VoiceCommand` to the orchestrator over ZMQ PUSH. Whisper-backed STT is a
-phase-2 task; for now the config option `stt.backend = whisper` raises.
+Reads commands from stdin, a scripted file, or a WAV clip (Whisper), and
+pushes a `VoiceCommand` to the orchestrator over ZMQ PUSH.
 
 Modes:
-    --once TEXT         Send a single command and exit. Good for scripted tests.
-    --from-file PATH    Send one command per non-blank line, with `--interval`
-                        seconds between them. Lines starting with `#` are
-                        treated as comments.
-    (default)           Interactive: read a line at a time from stdin and push
-                        each one. Blank lines are ignored. Ctrl-D / Ctrl-C
-                        ends the session.
+    --once TEXT          Send a single command and exit.
+    --from-file PATH     Send one command per non-blank line, with --interval
+                         seconds between.
+    --audio-file PATH    Transcribe a WAV clip via faster-whisper and push
+                         the result. Requires `pip install 'lexaire[stt-whisper]'`.
+                         Microphone capture is a follow-up (Docker audio
+                         passthrough is host-specific; file mode is portable).
+    (default)            Interactive: read a line at a time from stdin and
+                         push each one. Ctrl-D / Ctrl-C ends the session.
 
 The abort keyword from `stt.abort_keyword` (default `"abort"`) flips
 `is_abort=True` on the outgoing command so the orchestrator can short-circuit
@@ -38,27 +39,32 @@ class SttService:
         self.log = logs.configure("stt", cfg.get("logging.level", "INFO"))
         self.stop_event = threading.Event()
 
-        backend = cfg.get("stt.backend", "dummy")
-        if backend == "whisper":
-            raise NotImplementedError(
-                "stt.backend=whisper is a phase-2 task — set it back to 'dummy' for now"
-            )
-        if backend != "dummy":
-            raise ValueError(f"unknown stt.backend: {backend!r}")
+        # Whisper backend is built lazily — only --audio-file mode loads it,
+        # so text-mode runs don't waste seconds + GPU memory.
+        self._whisper = None
 
         self.abort_kw = cfg.get("stt.abort_keyword", "abort").lower().strip()
         self.push = transport.push(cfg.get(
             "services.orchestrator_command_pull", "tcp://127.0.0.1:6200"
         ))
 
+    def _get_whisper(self):
+        if self._whisper is not None:
+            return self._whisper
+        from .whisper_backend import FasterWhisperBackend  # lazy import
+        self._whisper = FasterWhisperBackend(
+            model_size=self.cfg.get("stt.whisper_model", "small"),
+            device=self.cfg.get("stt.whisper_device", "auto"),
+            compute_type=self.cfg.get("stt.whisper_compute_type", None),
+            language=self.cfg.get("stt.whisper_language", None),
+        )
+        return self._whisper
+
     # -- Lifecycle ------------------------------------------------------------
 
     def stop(self):
         self.stop_event.set()
-        try:
-            self.push.close()
-        except Exception:
-            pass
+        self.push.close()
 
     # -- Send -----------------------------------------------------------------
 
@@ -75,7 +81,27 @@ class SttService:
     # -- Modes ----------------------------------------------------------------
 
     def run_once(self, text: str) -> int:
+        # Give PUSH a beat to finish connecting before we send + exit, otherwise
+        # a fresh one-shot process can drop the message during teardown.
+        time.sleep(0.15)
         self.send(text)
+        # And a short hold so the LINGER drain window has time to run.
+        time.sleep(0.2)
+        return 0
+
+    def run_audio_file(self, path: str) -> int:
+        from .whisper_backend import load_wav_as_f32_mono_16k
+
+        whisper = self._get_whisper()
+        audio = load_wav_as_f32_mono_16k(path)
+        text = whisper.transcribe(audio)
+        if not text:
+            self.log.warning("whisper: no speech detected in %s", path)
+            return 0
+        self.log.info("whisper: %s", text)
+        time.sleep(0.15)
+        self.send(text)
+        time.sleep(0.2)
         return 0
 
     def run_file(self, path: str, interval_s: float) -> int:
@@ -94,7 +120,7 @@ class SttService:
 
     def run_interactive(self) -> int:
         self.log.info(
-            "interactive STT stub ready — type a command and hit Enter (Ctrl-D to quit)"
+            "interactive STT ready — type a command and hit Enter (Ctrl-D to quit)"
         )
         # Read stdin on a worker thread so SIGINT can still interrupt us.
         def _reader():
@@ -115,10 +141,12 @@ class SttService:
 
 
 def cli() -> int:
-    p = argparse.ArgumentParser(description="Lexaire STT service (phase-1 stub)")
+    p = argparse.ArgumentParser(description="Lexaire STT service")
     p.add_argument("--config", help="path to config.yaml")
     p.add_argument("--once", metavar="TEXT", help="send a single command and exit")
     p.add_argument("--from-file", metavar="PATH", help="read commands from a file, one per line")
+    p.add_argument("--audio-file", metavar="PATH",
+                   help="transcribe a WAV clip via the whisper backend and push the result")
     p.add_argument("--interval", type=float, default=1.0,
                    help="seconds between commands in --from-file mode (default 1.0)")
     args = p.parse_args()
@@ -132,6 +160,8 @@ def cli() -> int:
     signal.signal(signal.SIGTERM, _stop)
 
     try:
+        if args.audio_file is not None:
+            return svc.run_audio_file(args.audio_file)
         if args.once is not None:
             return svc.run_once(args.once)
         if args.from_file is not None:

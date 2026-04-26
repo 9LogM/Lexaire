@@ -1,11 +1,9 @@
 #include <iostream>
-#include <fstream>
 #include <sstream>
 #include <memory>
 #include <atomic>
 #include <chrono>
 #include <functional>
-#include <map>
 #include <string>
 
 #include <mavsdk/mavsdk.h>
@@ -34,13 +32,13 @@ struct AppContext {
     boost::asio::steady_timer    render_timer;
     bool                         render_dirty = false;
 
-    Mavsdk&                      sdk;
     std::shared_ptr<System>      system;
-    std::unique_ptr<PluginBase>  telemetry_plugin;
+    std::unique_ptr<Telemetry>   telemetry_plugin;
 
     State        state         = State::MainMenu;
     bool         qgc_connected = false;
     bool         relay_active  = false;
+    bool         stack_active  = false;
     std::string  input_line;
     std::string  sub_content;
     std::string  drone_host;
@@ -55,11 +53,10 @@ struct AppContext {
     boost::asio::steady_timer         services_tick;
     std::shared_ptr<std::function<void()>> services_tick_fn;
 
-    AppContext(Mavsdk& sdk, std::shared_ptr<System> system)
+    explicit AppContext(std::shared_ptr<System> system)
         : signals(io, SIGINT)
         , input_timer(io)
         , render_timer(io)
-        , sdk(sdk)
         , system(system)
         , services_tick(io) {}
 };
@@ -98,6 +95,15 @@ static void draw_header(const AppContext& ctx) {
     printw("%s", relay_status.c_str());
     attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | A_BOLD);
 
+    std::string stack_label  = "Stack: ";
+    std::string stack_status = ctx.stack_active ? "Up" : "Down";
+    int stack_col = relay_col - (int)(stack_label.size() + stack_status.size()) - 3;
+    mvprintw(1, stack_col, "%s", stack_label.c_str());
+    if (ctx.stack_active) attron(COLOR_PAIR(1) | A_BOLD);
+    else                  attron(COLOR_PAIR(2));
+    printw("%s", stack_status.c_str());
+    attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | A_BOLD);
+
     attron(A_BOLD);
     mvhline(2, 0, '=', cols);
     attroff(A_BOLD);
@@ -120,9 +126,10 @@ static void render(const AppContext& ctx) {
 
     if (ctx.state == State::MainMenu) {
         mvprintw(4, 2, ctx.relay_active ? "1. Stop relay" : "1. Start relay");
-        mvprintw(5, 2, "2. QGroundControl setup");
-        mvprintw(6, 2, "3. Live telemetry monitor");
-        mvprintw(7, 2, "4. Service status monitor");
+        mvprintw(5, 2, ctx.stack_active ? "2. Stop GCS stack" : "2. Start GCS stack");
+        mvprintw(6, 2, "3. QGroundControl setup");
+        mvprintw(7, 2, "4. Live telemetry monitor");
+        mvprintw(8, 2, "5. Service status monitor");
         attron(A_DIM);
         mvhline(rows - 3, 0, '-', cols);
         mvprintw(rows - 2, 2, "Ctrl+C to exit");
@@ -296,6 +303,31 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 2: {
+                bool stopping = ctx.stack_active;
+                std::string shell_cmd = stopping
+                    ? "docker compose down >/dev/null 2>&1"
+                    : "docker compose up -d --build >/dev/null 2>&1";
+                ctx.sub_content = stopping
+                    ? "  STOP GCS STACK\n\n  Stopping local services...\n\n"
+                    : "  START GCS STACK\n\n  Building and starting local services...\n\n";
+                ctx.state = State::SubMenu;
+                render(ctx);
+                boost::process::async_system(
+                    ctx.io,
+                    [&ctx, stopping](boost::system::error_code, int rc) {
+                        if (rc == 0) ctx.stack_active = !stopping;
+                        ctx.sub_content += rc == 0
+                            ? (stopping ? "  GCS stack stopped." : "  GCS stack running.")
+                            : "  Failed (exit " + std::to_string(rc) + ").\n"
+                              "  Check that Docker Desktop is running locally.";
+                        ctx.sub_content += "\n\n  Press Enter to return.";
+                        render(ctx);
+                    },
+                    boost::process::shell, shell_cmd
+                );
+                break;
+            }
+            case 3: {
                 std::string host = ctx.drone_host.substr(ctx.drone_host.find('@') + 1);
                 ctx.sub_content =
                     "  QGROUNDCONTROL SETUP\n\n"
@@ -309,6 +341,42 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 4: {
+                if (!ctx.system || !ctx.system->is_connected()) {
+                    ctx.sub_content =
+                        "  LIVE TELEMETRY\n\n"
+                        "  No drone connected.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
+                }
+                ctx.state = State::Monitoring;
+                ctx.telemetry_snap = std::make_shared<TelemetrySnapshot>();
+                ctx.telemetry_plugin = std::make_unique<Telemetry>(ctx.system);
+                setup_monitoring(
+                    *ctx.telemetry_plugin,
+                    ctx.telemetry_snap,
+                    [&ctx]() {
+                        boost::asio::post(ctx.io, [&ctx]() { request_render(ctx); });
+                    }
+                );
+                ctx.system->subscribe_is_connected([&ctx](bool connected) {
+                    boost::asio::post(ctx.io, [&ctx, connected]() {
+                        if (!connected && ctx.state == State::Monitoring) {
+                            ctx.telemetry_plugin = nullptr;
+                            ctx.sub_content =
+                                "  LIVE TELEMETRY\n\n"
+                                "  Connection lost.\n\n"
+                                "  Press Enter to return.";
+                            ctx.state = State::SubMenu;
+                            request_render(ctx);
+                        }
+                    });
+                });
+                render(ctx);
+                break;
+            }
+            case 5: {
                 ctx.state = State::Services;
                 if (!ctx.services_watcher) {
                     ctx.services_watcher = std::make_unique<ServicesWatcher>(
@@ -332,42 +400,6 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                         });
                 };
                 (*ctx.services_tick_fn)();
-                render(ctx);
-                break;
-            }
-            case 3: {
-                if (!ctx.system || !ctx.system->is_connected()) {
-                    ctx.sub_content =
-                        "  LIVE TELEMETRY\n\n"
-                        "  No drone connected.\n\n"
-                        "  Press Enter to return.";
-                    ctx.state = State::SubMenu;
-                    render(ctx);
-                    break;
-                }
-                ctx.state = State::Monitoring;
-                ctx.telemetry_snap = std::make_shared<TelemetrySnapshot>();
-                ctx.telemetry_plugin = std::make_unique<Telemetry>(ctx.system);
-                setup_monitoring(
-                    static_cast<Telemetry&>(*ctx.telemetry_plugin),
-                    ctx.telemetry_snap,
-                    [&ctx]() {
-                        boost::asio::post(ctx.io, [&ctx]() { request_render(ctx); });
-                    }
-                );
-                ctx.system->subscribe_is_connected([&ctx](bool connected) {
-                    boost::asio::post(ctx.io, [&ctx, connected]() {
-                        if (!connected && ctx.state == State::Monitoring) {
-                            ctx.telemetry_plugin = nullptr;
-                            ctx.sub_content =
-                                "  LIVE TELEMETRY\n\n"
-                                "  Connection lost.\n\n"
-                                "  Press Enter to return.";
-                            ctx.state = State::SubMenu;
-                            request_render(ctx);
-                        }
-                    });
-                });
                 render(ctx);
                 break;
             }
@@ -437,6 +469,23 @@ static void check_relay_once(AppContext& ctx) {
     );
 }
 
+static void check_stack_once(AppContext& ctx) {
+    // Any of the core GCS services up → stack is considered running. Ignores
+    // `lexaire` (build-only) and the `tools` profile entries.
+    std::string cmd =
+        "docker ps -q --filter name=lexaire-perception "
+        "--filter name=lexaire-orchestrator "
+        "--filter name=lexaire-flight-bridge | grep -q .";
+    boost::process::async_system(
+        ctx.io,
+        [&ctx](boost::system::error_code, int exit_code) {
+            ctx.stack_active = (exit_code == 0);
+            request_render(ctx);
+        },
+        boost::process::shell, cmd
+    );
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -460,7 +509,7 @@ int main() {
     const std::string orch_pub_ep = config.get_or<std::string>(
         "services.orchestrator_status_pub", "tcp://127.0.0.1:6102");
 
-    Mavsdk sdk{Mavsdk::Configuration{ComponentType::CompanionComputer}};
+    Mavsdk sdk{Mavsdk::Configuration{ComponentType::GroundStation}};
     if (sdk.add_any_connection(connection) != ConnectionResult::Success) {
         std::cerr << "Connection failed.\n";
         return -1;
@@ -480,7 +529,7 @@ int main() {
     init_pair(2, COLOR_YELLOW, -1);
     init_pair(3, COLOR_RED,    -1);
 
-    AppContext ctx(sdk, system);
+    AppContext ctx(system);
     ctx.drone_host    = drone_host;
     ctx.serial_device = serial_device;
     ctx.serial_baud   = serial_baud;
@@ -520,6 +569,7 @@ int main() {
     });
 
     check_relay_once(ctx);
+    check_stack_once(ctx);
     render(ctx);
     start_input_poll(ctx);
     ctx.io.run();

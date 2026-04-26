@@ -1,11 +1,8 @@
 services:
-  # ── C++ side ──────────────────────────────────────────────────────────────
-
   lexaire:
     build: .
     image: lexaire-cpp:latest
     container_name: lexaire
-    network_mode: host
     volumes:
       - ./common:/workspace/common:ro
       - ~/.ssh:/mnt/ssh:ro
@@ -15,16 +12,12 @@ services:
     depends_on:
       - lexaire
     container_name: lexaire-flight-bridge
-    network_mode: host
     entrypoint: []
+    # --dummy is the default; override command (and add extra_hosts for
+    # drone.local) in docker-compose.override.yaml for live-hardware runs.
     command: ["/workspace/build/lexaire-flight-bridge", "--dummy"]
     volumes:
       - ./common:/workspace/common:ro
-
-  # ── Python side ───────────────────────────────────────────────────────────
-  # All four services share one image; each overrides `command` to pick an
-  # entry point. `env_file: .env` sources secrets (GEMINI_API_KEY, ...) into
-  # the container without baking them into the image.
 
   perception:
     build:
@@ -32,9 +25,7 @@ services:
       dockerfile: python/Dockerfile
     image: lexaire-python:latest
     container_name: lexaire-perception
-    network_mode: host
-    env_file:
-      - .env
+    env_file: [.env]
     command: ["lexaire-perception"]
     volumes:
       - ./common:/workspace/common:ro
@@ -44,38 +35,27 @@ services:
     depends_on:
       - perception
     container_name: lexaire-orchestrator
-    network_mode: host
-    env_file:
-      - .env
+    env_file: [.env]
     command: ["lexaire-orchestrator"]
     volumes:
       - ./common:/workspace/common:ro
 
-  # STT is interactive (reads stdin). Under a profile so `docker compose up`
-  # doesn't crash-loop it on EOF. Invoke with:
-  #   docker compose --profile tools run --rm stt
-  #   docker compose --profile tools run --rm stt --once "takeoff to 1.5m"
+  # STT reads stdin; invoke via `docker compose --profile tools run --rm stt`.
   stt:
     image: lexaire-python:latest
     profiles: ["tools"]
-    network_mode: host
     stdin_open: true
     tty: true
-    env_file:
-      - .env
+    env_file: [.env]
     entrypoint: ["lexaire-stt"]
     volumes:
       - ./common:/workspace/common:ro
 
-  # Replay: bring up on demand with e.g.
-  #   docker compose run --rm replay synth
-  #   docker compose run --rm replay play /rec/flight-42.jsonl
+  # Record/playback of sensor streams (field-debug tool, opt-in via profile).
   replay:
     image: lexaire-python:latest
     profiles: ["tools"]
-    network_mode: host
-    env_file:
-      - .env
+    env_file: [.env]
     entrypoint: ["lexaire-replay"]
     volumes:
       - ./common:/workspace/common:ro

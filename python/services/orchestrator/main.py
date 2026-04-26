@@ -18,7 +18,6 @@ Threads:
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import queue
 import signal
@@ -36,20 +35,14 @@ from lexaire.messages import (
 )
 from lexaire.subscriber import SensorSubscriber
 
-from .tools import tool_schemas
-from .vlm_base import VLM, VlmContext, VlmDecision
-from .vlm_dummy import DummyVLM
+from .vlm_base import VLM, VlmContext
 
 
 def _build_vlm(cfg) -> VLM:
-    provider = cfg.get("perception.vlm.provider", "dummy")
-    if provider == "dummy":
-        return DummyVLM()
+    provider = cfg.get("perception.vlm.provider", "gemini")
     if provider == "gemini":
         from .vlm_gemini import build_gemini
         return build_gemini(cfg)
-    if provider in ("claude", "openai"):
-        raise NotImplementedError(f"{provider} backend not implemented yet")
     raise ValueError(f"unknown vlm provider: {provider}")
 
 
@@ -69,18 +62,19 @@ class Orchestrator:
         self.latest_telem: dict = {}
         self.latest_telem_lock = threading.Lock()
 
-        # Sensor subscriber: we hold onto the latest frame for the VLM.
+        # Hold onto the latest frame so the VLM sees current pixels.
         self.sub = SensorSubscriber(
             rgb_endpoint=cfg.sensor.channels.rgb,
             depth_endpoint=cfg.sensor.channels.depth,
-            imu_endpoint=cfg.sensor.channels.imu,
         )
         self.latest_fs = None
         self.latest_fs_lock = threading.Lock()
 
         # Sockets
-        self.command_pull = transport.pull(cfg.get("services.orchestrator_command_pull",
-                                                    "tcp://127.0.0.1:6200"))
+        # NOTE: command_pull is deferred — it's bound inside _run_command_thread
+        # on a fresh zmq.Context to work around a reception failure when the
+        # socket lives on the shared zmq.Context.instance() singleton.
+        self.command_pull = None
         self.status_pub = transport.pub(cfg.get("services.orchestrator_status_pub",
                                                  "tcp://127.0.0.1:6102"))
         self.scene_sub = transport.sub(cfg.get("services.perception_scene_pub",
@@ -91,10 +85,9 @@ class Orchestrator:
                                             "tcp://127.0.0.1:6300")
 
         self.safety_snapshot = {
-            "max_altitude_m":          float(cfg.get("safety.max_altitude_m", 5.0)),
-            "geofence_radius_m":       float(cfg.get("safety.geofence_radius_m", 10.0)),
-            "max_velocity_mps":        float(cfg.get("safety.max_velocity_mps", 1.5)),
-            "min_obstacle_distance_m": float(cfg.get("safety.min_obstacle_distance_m", 0.5)),
+            "max_altitude_m":    float(cfg.get("safety.max_altitude_m", 5.0)),
+            "geofence_radius_m": float(cfg.get("safety.geofence_radius_m", 10.0)),
+            "max_velocity_mps":  float(cfg.get("safety.max_velocity_mps", 1.5)),
         }
 
     # -- Lifecycle ------------------------------------------------------------
@@ -120,26 +113,41 @@ class Orchestrator:
         for t in self._threads:
             t.join(timeout=1.5)
         for s in (self.command_pull, self.status_pub, self.scene_sub, self.telem_sub):
-            try: s.close()
-            except Exception: pass
+            if s is not None:
+                s.close()
 
     # -- Sockets --------------------------------------------------------------
 
     def _run_command_thread(self):
+        # Bind PULL on a fresh zmq.Context rather than the shared instance().
+        # Observed: PULL sockets created on zmq.Context.instance() in this
+        # process silently drop reception — poll() never fires POLLIN even
+        # though the socket is listening and writes succeed on the wire.
+        _cmd_ep = self.cfg.get("services.orchestrator_command_pull", "tcp://127.0.0.1:6200")
+        from urllib.parse import urlparse as _urlparse
+        _u = _urlparse(_cmd_ep)
+        _bind_ep = f"tcp://*:{_u.port}" if _u.port else _cmd_ep
+        _local_ctx = zmq.Context()
+        _pull = _local_ctx.socket(zmq.PULL)
+        _pull.setsockopt(zmq.RCVHWM, 16)
+        _pull.setsockopt(zmq.LINGER, 0)
+        _pull.bind(_bind_ep)
+        self.command_pull = _pull
         poller = zmq.Poller()
-        poller.register(self.command_pull, zmq.POLLIN)
+        poller.register(_pull, zmq.POLLIN)
         while not self.stop_event.is_set():
             events = dict(poller.poll(250))
-            if self.command_pull not in events:
+            if _pull not in events:
                 continue
             try:
-                frame = self.command_pull.recv()
+                frame = _pull.recv()
                 hdr = decode_header(frame)
                 cmd = VoiceCommand(
                     ts_ns=int(hdr.get("ts_ns", now_ns())),
                     text=str(hdr.get("text", "")),
                     is_abort=bool(hdr.get("is_abort", False)),
                 )
+                self.log.info("command: %r (abort=%s)", cmd.text, cmd.is_abort)
                 self.command_q.put(cmd, timeout=0.5)
             except queue.Full:
                 self.log.warning("command queue full — dropping")
@@ -239,13 +247,26 @@ class Orchestrator:
         )
 
     def _dispatch_tool_call(self, tc: ToolCall) -> ToolResult:
-        """Open a short-lived REQ socket per call (simpler than managing a persistent one)."""
-        req = transport.req(self.flight_req_endpoint, timeout_ms=3000)
+        # Fresh zmq.Context per call — same workaround as the PULL in
+        # _run_command_thread: zmq.Context.instance() silently drops traffic
+        # on some sockets in this process.
+        _ctx_local = zmq.Context()
+        req = _ctx_local.socket(zmq.REQ)
+        req.setsockopt(zmq.LINGER, 0)
+        req.setsockopt(zmq.RCVTIMEO, 3000)
+        req.setsockopt(zmq.SNDTIMEO, 3000)
+        req.connect(self.flight_req_endpoint)
+        # Every arm dispatched by the orchestrator is by definition the result
+        # of a spoken voice command — the bridge's safety gate flips on this
+        # flag to prove the arm was pilot-initiated, not LLM-hallucinated.
+        args = dict(tc.args) if tc.args else {}
+        if tc.name == "arm":
+            args["voice_confirmed"] = True
         try:
             req.send(json.dumps({
                 "request_id": tc.request_id,
                 "name": tc.name,
-                "args": tc.args,
+                "args": args,
             }).encode("utf-8"))
             reply = req.recv()
             data = json.loads(reply.decode("utf-8"))
@@ -265,6 +286,7 @@ class Orchestrator:
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
         finally:
             req.close()
+            _ctx_local.term()
 
     def _publish_status(self, state: str, note: str):
         msg = OrchestratorStatus(

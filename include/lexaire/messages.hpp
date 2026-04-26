@@ -7,10 +7,10 @@
 // optional binary payload in frame 1. C++ services use nlohmann::json (which
 // MAVSDK already depends on) to encode/decode headers.
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -21,6 +21,19 @@ using nlohmann::json;
 inline std::int64_t now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Rewrite a tcp endpoint's host to the wildcard `*` so a service can bind on
+// every interface regardless of what its own configured hostname resolves to.
+// Lets one config string serve both bind and connect sides — useful inside
+// container networks where the bind host (service name) may resolve only to
+// a private bridge IP.
+inline std::string bind_endpoint(const std::string& ep) {
+    const std::string prefix = "tcp://";
+    if (ep.rfind(prefix, 0) != 0) return ep;
+    const auto colon = ep.rfind(':');
+    if (colon == std::string::npos || colon <= prefix.size()) return ep;
+    return prefix + "*" + ep.substr(colon);
 }
 
 // Telemetry snapshot broadcast by the flight bridge.

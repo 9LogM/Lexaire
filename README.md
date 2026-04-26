@@ -28,9 +28,10 @@ Natural Language Control and Autonomy for Drone Systems.
 
 Edit `common/config.yaml`:
 ```yaml
-serial_device: /dev/ttyACM0       # serial port to flight controller (companion computer side)
-serial_baud: 57600                # baud rate of the serial connection
-drone_host: user@companion.local  # SSH connection to companion computer
+drone:
+  host:          user@companion.local   # SSH target for the companion computer
+  serial_device: /dev/ttyACM0           # FC serial port on the companion computer
+  serial_baud:   57600                  # baud rate of the FC link
 ```
 
 ### SSH key setup
@@ -39,7 +40,7 @@ Lexaire deploys the relay over SSH. Run once from the ground station:
 
 ```bash
 ssh-keygen -t ed25519 -C "lexaire"   # skip if you already have a key
-ssh-copy-id user@companion.local   # use the drone_host value from config.yaml
+ssh-copy-id user@companion.local   # use the drone.host value from config.yaml
 ```
 
 ### Build

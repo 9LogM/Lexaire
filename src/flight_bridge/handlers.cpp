@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 
 using namespace mavsdk;
 using lexaire::json;
@@ -38,6 +39,19 @@ std::string offboard_result_to_string(Offboard::Result r) {
         case Offboard::Result::CommandDenied: return "command_denied";
         case Offboard::Result::Timeout: return "timeout";
         case Offboard::Result::NoSetpointSet: return "no_setpoint";
+        default: return "unknown";
+    }
+}
+
+std::string param_result_to_string(Param::Result r) {
+    switch (r) {
+        case Param::Result::Success: return "success";
+        case Param::Result::Timeout: return "timeout";
+        case Param::Result::ConnectionError: return "connection_error";
+        case Param::Result::WrongType: return "wrong_type";
+        case Param::Result::ParamNameTooLong: return "param_name_too_long";
+        case Param::Result::NoSystem: return "no_system";
+        case Param::Result::ParamValueTooLong: return "param_value_too_long";
         default: return "unknown";
     }
 }
@@ -144,8 +158,38 @@ ToolResult handle_abort(const ToolCall& c, FlightCtx& ctx) {
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->kill();
     if (r == Action::Result::Success) return ok(c.request_id);
-    // Fall back to land if kill is rejected.
     return err(c.request_id, action_result_to_string(r));
+}
+
+// Operator-only; not in tool_schemas() — the VLM cannot reach it.
+ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
+    std::string name = c.args.value("name", "");
+    if (name.empty()) return err(c.request_id, "missing_param_name");
+    if (ctx.dummy) {
+        std::fprintf(stderr, "[flight-bridge DUMMY] set_param %s\n", name.c_str());
+        return ok(c.request_id);
+    }
+    if (!ctx.param) return err(c.request_id, "param_not_initialized");
+
+    if (c.args.contains("int_value")) {
+        int v = c.args.value("int_value", 0);
+        auto r = ctx.param->set_param_int(name, v);
+        if (r == Param::Result::Success) {
+            std::fprintf(stderr, "[flight-bridge] set_param %s=%d ok\n", name.c_str(), v);
+            return ok(c.request_id);
+        }
+        return err(c.request_id, "param_set_failed:" + param_result_to_string(r));
+    }
+    if (c.args.contains("float_value")) {
+        float v = c.args.value("float_value", 0.0f);
+        auto r = ctx.param->set_param_float(name, v);
+        if (r == Param::Result::Success) {
+            std::fprintf(stderr, "[flight-bridge] set_param %s=%g ok\n", name.c_str(), v);
+            return ok(c.request_id);
+        }
+        return err(c.request_id, "param_set_failed:" + param_result_to_string(r));
+    }
+    return err(c.request_id, "missing_value");
 }
 
 ToolResult handle_get_telemetry(const ToolCall& c, FlightCtx& ctx) {
@@ -165,7 +209,60 @@ ToolResult handle_get_telemetry(const ToolCall& c, FlightCtx& ctx) {
         {"ve_mps", vel.east_m_s},
         {"vd_mps", vel.down_m_s},
         {"armed", ctx.telemetry->armed()},
-        {"flight_mode", to_string(ctx.telemetry->flight_mode())},
+        {"flight_mode", flight_mode_to_string(ctx.telemetry->flight_mode())},
+    };
+    return ok(c.request_id, std::move(data));
+}
+
+// Seed a zero-velocity setpoint, enter OFFBOARD, and hold for >1s so PX4's
+// proof-of-life check passes before a follow-up arm.
+// Ref: docs.px4.io/main/en/flight_modes/offboard
+ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
+    if (ctx.dummy) {
+        std::fprintf(stderr, "[flight-bridge DUMMY] enable_offboard\n");
+        return ok(c.request_id);
+    }
+    if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
+
+    Offboard::VelocityNedYaw zero{0.0f, 0.0f, 0.0f, 0.0f};
+    ctx.offboard->set_velocity_ned(zero);
+    auto r = ctx.offboard->start();
+    if (r != Offboard::Result::Success && r != Offboard::Result::Busy) {
+        return err(c.request_id, "offboard_start_failed:" + offboard_result_to_string(r));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    std::fprintf(stderr, "[flight-bridge] offboard active\n");
+    return ok(c.request_id);
+}
+
+ToolResult handle_get_param(const ToolCall& c, FlightCtx& ctx) {
+    std::string name = c.args.value("name", "");
+    if (name.empty()) return err(c.request_id, "missing_param_name");
+    if (ctx.dummy) return err(c.request_id, "dummy_mode");
+    if (!ctx.param) return err(c.request_id, "param_not_initialized");
+    auto [r, v] = ctx.param->get_param_int(name);
+    if (r == Param::Result::Success) {
+        return ok(c.request_id, json{{"int_value", v}});
+    }
+    auto [r2, v2] = ctx.param->get_param_float(name);
+    if (r2 == Param::Result::Success) {
+        return ok(c.request_id, json{{"float_value", v2}});
+    }
+    return err(c.request_id, "param_get_failed:" + param_result_to_string(r));
+}
+
+// Operator-only diagnostic: dump MAVSDK's pre-arm health flags.
+ToolResult handle_get_health(const ToolCall& c, FlightCtx& ctx) {
+    if (!ctx.telemetry) return err(c.request_id, "telemetry_not_initialized");
+    auto h = ctx.telemetry->health();
+    json data = {
+        {"is_armable", h.is_armable},
+        {"is_gyrometer_calibration_ok", h.is_gyrometer_calibration_ok},
+        {"is_accelerometer_calibration_ok", h.is_accelerometer_calibration_ok},
+        {"is_magnetometer_calibration_ok", h.is_magnetometer_calibration_ok},
+        {"is_local_position_ok", h.is_local_position_ok},
+        {"is_global_position_ok", h.is_global_position_ok},
+        {"is_home_position_ok", h.is_home_position_ok},
     };
     return ok(c.request_id, std::move(data));
 }
@@ -183,9 +280,12 @@ ToolResult dispatch(const ToolCall& call, FlightCtx& ctx) {
         {"hold",              &handle_hold},
         {"goto_ned",          &handle_goto_ned},
         {"set_velocity_ned",  &handle_set_velocity_ned},
-        {"set_velocity",      &handle_set_velocity_ned},
         {"abort",             &handle_abort},
         {"get_telemetry",     &handle_get_telemetry},
+        {"set_param",         &handle_set_param},
+        {"get_param",         &handle_get_param},
+        {"get_health",        &handle_get_health},
+        {"enable_offboard",   &handle_enable_offboard},
     };
     auto it = kHandlers.find(call.name);
     if (it == kHandlers.end()) return err(call.request_id, "unknown_tool: " + call.name);

@@ -1,30 +1,23 @@
 """
-Detector backends for the perception service.
+Detectors emit a per-tick scene graph (label, bbox, depth, camera-frame xyz)
+that the orchestrator consumes alongside its own VLM reasoning.
 
-Two abstractions coexist by design:
-
-* VLM backends — the model itself emits detections given the frame. A VLM
-  orchestrator may bypass this step entirely and reason on pixels directly,
-  but for quick-inner-loop reporting to the orchestrator we still produce a
-  list of (label, bbox, depth) so downstream logic has something to reason
-  about.
-* Detector backends — a purpose-built open-vocab detector (GroundingDINO,
-  YOLO-World) runs locally and returns bboxes. Later phases can wire one in.
-
-For now, only the dummy detector is implemented; it fabricates a single
-"table" detection at the center of the frame so the rest of the pipeline is
-exercised end-to-end without a real model.
+Currently shipped: YoloDetector (Ultralytics YOLO11, COCO-80). Requires
+`pip install 'lexaire[detector-yolo]'`; downloads weights on first run.
 """
 
 from __future__ import annotations
 
 import abc
-import random
+import logging
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
 from lexaire.messages import Detection
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,34 +32,6 @@ class Detector(abc.ABC):
     @abc.abstractmethod
     def detect(self, inp: DetectorInputs) -> list[Detection]:
         ...
-
-
-class DummyDetector(Detector):
-    """Fabricates a detection at the frame center so the pipeline has data."""
-
-    LABELS = ["table", "chair", "doorway", "person", "box"]
-
-    def __init__(self, seed: int = 0, label_cycle: bool = True):
-        self._rng = random.Random(seed)
-        self._i = 0
-        self._cycle = label_cycle
-
-    def detect(self, inp: DetectorInputs) -> list[Detection]:
-        h, w = inp.rgb.shape[:2]
-        bw, bh = int(w * 0.3), int(h * 0.3)
-        bx, by = (w - bw) // 2, (h - bh) // 2
-
-        label = self.LABELS[self._i % len(self.LABELS)] if self._cycle else "object"
-        self._i += 1
-
-        depth_m, xyz = _center_depth_and_xyz(inp.depth, inp.depth_scale_m, inp.intrinsics, bx, by, bw, bh)
-        return [Detection(
-            label=label,
-            bbox_xywh=[float(bx), float(by), float(bw), float(bh)],
-            confidence=0.9,
-            depth_m=depth_m,
-            xyz_cam_m=xyz,
-        )]
 
 
 def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
@@ -101,16 +66,98 @@ def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
     return z_m, [X, Y, z_m]
 
 
+class YoloDetector(Detector):
+    """Ultralytics YOLO11 (COCO-80). Fast on CPU, faster on CUDA.
+
+    Model weights auto-download on first use; cache at `~/.cache/ultralytics`
+    inside the container (mount a volume if that matters for reproducibility).
+    Confidence threshold and max detections are config-driven.
+    """
+
+    def __init__(
+        self,
+        weights: str = "yolo11n.pt",
+        score_threshold: float = 0.35,
+        max_detections: int = 20,
+        device: str = "auto",
+        classes: Optional[list[str]] = None,
+    ):
+        try:
+            from ultralytics import YOLO  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "ultralytics not installed. "
+                "pip install 'lexaire[detector-yolo]' or `pip install ultralytics`."
+            ) from e
+
+        self._model = YOLO(weights)
+        self._score = float(score_threshold)
+        self._max_det = int(max_detections)
+        self._device = None if device == "auto" else device
+        self._class_filter: Optional[set[int]] = None
+        if classes:
+            name_to_id = {v: k for k, v in self._model.names.items()}
+            wanted = {name_to_id[c] for c in classes if c in name_to_id}
+            missing = [c for c in classes if c not in name_to_id]
+            if missing:
+                log.warning("YoloDetector: unknown classes ignored: %s", missing)
+            self._class_filter = wanted or None
+
+    def detect(self, inp: DetectorInputs) -> list[Detection]:
+        # BGR (our convention) -> RGB for ultralytics.
+        rgb = inp.rgb[..., ::-1]
+        predict_kwargs = dict(
+            source=rgb,
+            conf=self._score,
+            max_det=self._max_det,
+            verbose=False,
+        )
+        if self._device:
+            predict_kwargs["device"] = self._device
+        if self._class_filter:
+            predict_kwargs["classes"] = sorted(self._class_filter)
+
+        results = self._model.predict(**predict_kwargs)
+        if not results:
+            return []
+
+        out: list[Detection] = []
+        r = results[0]
+        boxes = getattr(r, "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        cls  = boxes.cls.cpu().numpy().astype(int)
+        names = self._model.names
+
+        for (x0, y0, x1, y1), c, k in zip(xyxy, conf, cls, strict=True):
+            bw = float(x1 - x0)
+            bh = float(y1 - y0)
+            bx = float(x0)
+            by = float(y0)
+            depth_m, xyz = _center_depth_and_xyz(
+                inp.depth, inp.depth_scale_m, inp.intrinsics, bx, by, bw, bh
+            )
+            out.append(Detection(
+                label=str(names.get(int(k), f"id_{int(k)}")),
+                bbox_xywh=[bx, by, bw, bh],
+                confidence=float(c),
+                depth_m=depth_m,
+                xyz_cam_m=xyz,
+            ))
+        return out
+
+
 def build_detector(cfg) -> Detector:
-    backend = cfg.get("perception.backend", "vlm")
-    if backend == "vlm":
-        # In VLM mode, the orchestrator owns reasoning about pixels directly.
-        # The perception service still runs a cheap local detector so it can
-        # publish an approximate scene graph on its own tick.
-        return DummyDetector()
-    if backend == "detector":
-        model = cfg.get("perception.detector.model", "dummy")
-        if model == "grounding-dino":
-            raise NotImplementedError("grounding-dino detector not wired yet (phase 1 work)")
-        return DummyDetector()
-    raise ValueError(f"unknown perception backend: {backend}")
+    model = cfg.get("perception.detector.model", "yolo")
+    if model == "yolo":
+        return YoloDetector(
+            weights=cfg.get("perception.detector.weights", "yolo11n.pt"),
+            score_threshold=float(cfg.get("perception.detector.score_threshold", 0.35)),
+            max_detections=int(cfg.get("perception.detector.max_detections", 20)),
+            device=cfg.get("perception.detector.device", "auto"),
+            classes=cfg.get("perception.detector.classes", None),
+        )
+    raise ValueError(f"unknown perception.detector.model: {model!r}")

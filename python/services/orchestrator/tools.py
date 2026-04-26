@@ -1,15 +1,8 @@
 """
-Tool schema exposed to the VLM.
-
-Kept in one place because both the dummy and Gemini backends need to describe
-the tool surface to the model. The schema mirrors the handlers in
-`src/flight_bridge/handlers.cpp` — if a new handler is added there, add a
-spec here.
-
-Design note: we do NOT curate/reshape MAVSDK. The schema is intentionally
-broad so the VLM picks the command. Safety limits are enforced in the flight
-bridge below this layer — the VLM sees them as environmental context, not as
-gates it can negotiate.
+Tool schema exposed to the VLM. Mirrors the handler set in
+`src/flight_bridge/handlers.cpp` — keep the two in sync. Safety limits are
+enforced in the flight bridge; the VLM sees them as context, not as gates
+it can negotiate.
 """
 
 from __future__ import annotations
@@ -18,10 +11,7 @@ from typing import Any
 
 
 def tool_schemas() -> list[dict[str, Any]]:
-    """
-    Vendor-neutral tool description. Each VLM backend maps this into its own
-    function-calling format.
-    """
+    """Vendor-neutral tool descriptions; each backend maps to its own format."""
     return [
         {
             "name": "arm",

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import yaml
 
@@ -45,13 +45,6 @@ class _AttrDict(dict):
             else:
                 return default
         return cur
-
-    def resolve_env(self, key: str) -> str | None:
-        """Read a sibling `<key>_env` field and look up the env var."""
-        env_name = self.get(f"{key}_env")
-        if env_name is None:
-            return None
-        return os.environ.get(env_name)
 
 
 def _wrap(obj: Any) -> Any:
@@ -117,17 +110,4 @@ def load_config(path: str | None = None) -> _AttrDict:
     with config_path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
-    cfg = _wrap(raw)
-    cfg["_path"] = str(config_path)
-    return cfg
-
-
-def walk_leaves(d: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
-    """Yield (dotted_key, value) for every non-dict leaf."""
-    if isinstance(d, dict):
-        for k, v in d.items():
-            if k.startswith("_"):
-                continue
-            yield from walk_leaves(v, f"{prefix}.{k}" if prefix else k)
-    else:
-        yield prefix, d
+    return _wrap(raw)

@@ -1,1 +1,1 @@
-"""Lexaire STT service (stub for phase 1)."""
+"""Lexaire STT service."""

@@ -19,23 +19,24 @@ __pycache__/
 # Editor / OS
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
 *.swp
 
-# Logs and map data (runtime)
+# Runtime output
 *.log
 maps/
 recordings/
 
-# Local config overrides
+# Local overrides
 common/config.local.yaml
+docker-compose.override.yaml
 
-# Tests — local-only scaffolding, not tracked
+# Engineering journal — kept locally, not in the public repo
+REPORT.md
+
+# Local-only subtrees
 python/tests/
-
-# RS-L515-Docker is a separate git repository cloned in-place. We don't
-# track it from Lexaire because (a) it has its own upstream at
-# https://github.com/9LogM/RS-L515 and (b) nested-repo-as-gitlink is
-# fragile without a remote. See REPORT.md "Submodule situation".
+python/tools/
 RS-L515-Docker/

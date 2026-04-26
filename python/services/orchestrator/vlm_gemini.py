@@ -1,13 +1,12 @@
 """
 Gemini VLM backend.
 
-Uses google-generativeai to call a Gemini multimodal model with the current
-RGB frame, structured scene+telemetry context, and the tool schema. Emits
-function-call responses as ToolCall objects.
+Calls a Gemini multimodal model with the current RGB frame, structured
+scene+telemetry context, and the tool schema. Emits function-call responses
+as ToolCall objects.
 
-Install: `pip install google-generativeai`
-Model default: `gemini-2.0-flash-exp` (cheap/fast, good for dev). Config
-`perception.vlm.model` overrides.
+Install: `pip install 'lexaire[gemini]'`. Model is set by
+`perception.vlm.model` in config.yaml (default `gemini-2.5-flash`).
 """
 
 from __future__ import annotations
@@ -32,32 +31,33 @@ log = logging.getLogger(__name__)
 class GeminiVLM(VLM):
     def __init__(self, model_name: str, api_key: str, temperature: float = 0.2):
         try:
-            import google.generativeai as genai  # type: ignore
+            from google import genai  # type: ignore
+            from google.genai import types as genai_types  # type: ignore
         except ImportError as e:
             raise RuntimeError(
-                "google-generativeai not installed. "
-                "pip install 'lexaire[gemini]' or `pip install google-generativeai`."
+                "google-genai not installed. "
+                "pip install 'lexaire[gemini]' or `pip install google-genai`."
             ) from e
 
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is unset — cannot start Gemini backend")
 
-        genai.configure(api_key=api_key)
-        self._genai = genai
-        self._temperature = temperature
+        self._types = genai_types
+        self._client = genai.Client(api_key=api_key)
+        self._model_name = model_name
 
-        tools = [{"function_declarations": [
-            {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["parameters"],
-            } for t in tool_schemas()
-        ]}]
-
-        self._model = genai.GenerativeModel(
-            model_name=model_name,
-            tools=tools,
+        fn_decls = [
+            genai_types.FunctionDeclaration(
+                name=t["name"],
+                description=t["description"],
+                parameters=t["parameters"],
+            )
+            for t in tool_schemas()
+        ]
+        self._config = genai_types.GenerateContentConfig(
             system_instruction=_SYSTEM_PROMPT,
+            temperature=temperature,
+            tools=[genai_types.Tool(function_declarations=fn_decls)],
         )
 
     def decide(self, ctx: VlmContext) -> VlmDecision:
@@ -66,13 +66,13 @@ class GeminiVLM(VLM):
         if img is not None:
             parts.append(img)
 
-        prompt = self._build_prompt(ctx)
-        parts.append(prompt)
+        parts.append(self._build_prompt(ctx))
 
         try:
-            resp = self._model.generate_content(
-                parts,
-                generation_config={"temperature": self._temperature},
+            resp = self._client.models.generate_content(
+                model=self._model_name,
+                contents=parts,
+                config=self._config,
             )
         except Exception as e:
             log.exception("Gemini call failed: %s", e)
@@ -107,11 +107,11 @@ class GeminiVLM(VLM):
     def _encode_rgb(self, rgb: Optional[np.ndarray]):
         if rgb is None:
             return None
-        # BGR -> RGB, to JPEG-in-memory for Gemini's inline image input.
+        # BGR -> RGB, JPEG-in-memory for Gemini's inline image input.
         pil = Image.fromarray(rgb[..., ::-1].copy())
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=85)
-        return {"mime_type": "image/jpeg", "data": buf.getvalue()}
+        return self._types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
 
     def _build_prompt(self, ctx: VlmContext) -> str:
         scene_compact = []
@@ -151,7 +151,7 @@ _SYSTEM_PROMPT = (
 
 
 def build_gemini(cfg) -> GeminiVLM:
-    model = cfg.get("perception.vlm.model", "gemini-2.0-flash-exp")
+    model = cfg.get("perception.vlm.model", "gemini-2.5-flash")
     api_key_var = cfg.get("perception.vlm.api_key_env", "GEMINI_API_KEY")
     api_key = os.environ.get(api_key_var, "")
     temp = float(cfg.get("perception.vlm.temperature", 0.2))

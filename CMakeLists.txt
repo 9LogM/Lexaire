@@ -12,7 +12,7 @@ find_package(yaml-cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
-# ── TUI (existing) ─────────────────────────────────────────────────────────────
+# TUI
 
 add_executable(lexaire
     src/main.cpp
@@ -35,7 +35,7 @@ target_link_libraries(lexaire PRIVATE
     yaml-cpp
 )
 
-# ── Flight bridge (phase 2) ────────────────────────────────────────────────────
+# Flight bridge
 
 add_executable(lexaire-flight-bridge
     src/flight_bridge/main.cpp

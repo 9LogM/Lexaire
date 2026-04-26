@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -52,13 +53,17 @@ static int run(bool dummy) {
     ctx.dummy = dummy;
     ctx.safety = &state;
 
-    mavsdk::Mavsdk sdk{mavsdk::Mavsdk::Configuration{mavsdk::ComponentType::CompanionComputer}};
+    // PX4 only routes STATUSTEXT to peers whose heartbeat advertises
+    // MAV_TYPE_GCS. The bridge is the pilot's interface — voice → tool
+    // calls — so GCS is the correct identity.
+    // Ref: discuss.px4.io/t/cant-receive-mavlink-253-statustext-message-via-companion-link-since-1-6-4/5429
+    mavsdk::Mavsdk sdk{mavsdk::Mavsdk::Configuration{mavsdk::ComponentType::GroundStation}};
     if (!dummy) {
         if (sdk.add_any_connection(mavsdk_uri) != mavsdk::ConnectionResult::Success) {
             std::fprintf(stderr, "[flight-bridge] MAVSDK connection to %s failed\n", mavsdk_uri.c_str());
             return 2;
         }
-        // Wait up to 5s for a system; continue without if none found (dummy-like behavior for testing).
+        // Wait up to 5s for a system; if none appears, handlers return errors.
         for (int i = 0; i < 50 && !g_stop.load(); ++i) {
             for (auto& s : sdk.systems()) if (s->has_autopilot()) { ctx.system = s; break; }
             if (ctx.system) break;
@@ -67,7 +72,14 @@ static int run(bool dummy) {
         if (ctx.system) {
             ctx.action    = std::make_unique<mavsdk::Action>(ctx.system);
             ctx.offboard  = std::make_unique<mavsdk::Offboard>(ctx.system);
+            ctx.param     = std::make_unique<mavsdk::Param>(ctx.system);
             ctx.telemetry = std::make_unique<mavsdk::Telemetry>(ctx.system);
+            // Hold the handle — MAVSDK unsubscribes when the returned handle
+            // goes out of scope, dropping all STATUSTEXT lines silently.
+            ctx.status_text_handle = ctx.telemetry->subscribe_status_text(
+                [](mavsdk::Telemetry::StatusText st) {
+                    std::fprintf(stderr, "[px4] %s\n", st.text.c_str());
+                });
             std::fprintf(stderr, "[flight-bridge] autopilot connected\n");
         } else {
             std::fprintf(stderr, "[flight-bridge] no autopilot found in 5s — handlers will return errors\n");
@@ -81,12 +93,14 @@ static int run(bool dummy) {
     int linger = 0;
     zmq_setsockopt(rep, ZMQ_LINGER, &linger, sizeof(linger));
     zmq_setsockopt(pub, ZMQ_LINGER, &linger, sizeof(linger));
-    if (zmq_bind(rep, rep_ep.c_str()) != 0) {
-        std::fprintf(stderr, "[flight-bridge] zmq_bind REP %s failed: %s\n", rep_ep.c_str(), zmq_strerror(zmq_errno()));
+    const std::string rep_bind = lexaire::bind_endpoint(rep_ep);
+    const std::string tele_bind = lexaire::bind_endpoint(telemetry_ep);
+    if (zmq_bind(rep, rep_bind.c_str()) != 0) {
+        std::fprintf(stderr, "[flight-bridge] zmq_bind REP %s failed: %s\n", rep_bind.c_str(), zmq_strerror(zmq_errno()));
         return 3;
     }
-    if (zmq_bind(pub, telemetry_ep.c_str()) != 0) {
-        std::fprintf(stderr, "[flight-bridge] zmq_bind PUB %s failed: %s\n", telemetry_ep.c_str(), zmq_strerror(zmq_errno()));
+    if (zmq_bind(pub, tele_bind.c_str()) != 0) {
+        std::fprintf(stderr, "[flight-bridge] zmq_bind PUB %s failed: %s\n", tele_bind.c_str(), zmq_strerror(zmq_errno()));
         return 3;
     }
 
@@ -99,16 +113,16 @@ static int run(bool dummy) {
             if (ctx.telemetry) {
                 t.connected = ctx.system && ctx.system->is_connected();
                 t.armed = ctx.telemetry->armed();
-                t.flight_mode = to_string(ctx.telemetry->flight_mode());
+                t.flight_mode = lexaire::flight_mode_to_string(ctx.telemetry->flight_mode());
                 auto b = ctx.telemetry->battery();
-                t.battery_pct = static_cast<int>(b.remaining_percent * 100.0f);
+                // MAVSDK Battery::remaining_percent is already 0..100, not 0..1.
+                t.battery_pct = static_cast<int>(b.remaining_percent);
                 t.battery_v = b.voltage_v;
                 auto p = ctx.telemetry->position();
                 t.lat = p.latitude_deg;
                 t.lon = p.longitude_deg;
                 t.abs_alt_m = p.absolute_altitude_m;
                 t.rel_alt_m = p.relative_altitude_m;
-                state.current_rel_alt_m.store(p.relative_altitude_m);
                 auto a = ctx.telemetry->attitude_euler();
                 t.roll_deg = a.roll_deg;
                 t.pitch_deg = a.pitch_deg;
@@ -125,7 +139,7 @@ static int run(bool dummy) {
         }
     });
 
-    // Main REQ/REP loop. One request at a time — simple, fine for our rates.
+    // Main REQ/REP loop. Serial is fine at the orchestrator's command rate.
     while (!g_stop.load()) {
         zmq_pollitem_t items[] = {{rep, 0, ZMQ_POLLIN, 0}};
         int rc = zmq_poll(items, 1, 250);
@@ -140,12 +154,23 @@ static int run(bool dummy) {
         try {
             json req = json::parse(std::string(buf, n));
             lexaire::ToolCall call = lexaire::ToolCall::from_json(req);
+
+            // An arm call carrying voice_confirmed=true flips the spoken-arm
+            // gate before safety runs. The orchestrator is the only producer
+            // of tool calls and it only runs in response to a voice command,
+            // so any arm that reaches here is by construction voice-spoken.
+            // The flag persists until disarm so takeoff can follow the same
+            // armed session — fresh arm next flight requires fresh voice.
+            if (call.name == "arm" && call.args.value("voice_confirmed", false)) {
+                state.armed_with_voice.store(true);
+            }
+
             auto gate = lexaire::check_tool(call.name, call.args, env, state);
             if (!gate.allow) {
                 result = lexaire::ToolResult{call.request_id, false, "safety_denied: " + gate.reason, json::object()};
             } else {
                 result = lexaire::dispatch(call, ctx);
-                if (call.name == "arm" && result.ok) state.armed_with_voice.store(false);  // one-shot
+                if (call.name == "disarm" && result.ok) state.armed_with_voice.store(false);
             }
         } catch (const std::exception& e) {
             result = lexaire::ToolResult{"", false, std::string("bad_request: ") + e.what(), json::object()};
@@ -168,8 +193,6 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dummy") == 0) dummy = true;
     }
-    if (const char* e = std::getenv("LEXAIRE_FLIGHT_DUMMY"); e && std::string(e) != "0") dummy = true;
-
     std::signal(SIGINT, on_sigint);
     std::signal(SIGTERM, on_sigint);
     return run(dummy);

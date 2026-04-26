@@ -7,11 +7,9 @@
 // whole struct through.
 
 #include <filesystem>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include <yaml-cpp/yaml.h>
 
@@ -24,9 +22,6 @@ public:
         YAML::Node root = YAML::LoadFile(p.string());
         return Config{root, p};
     }
-
-    const YAML::Node& root() const { return root_; }
-    const std::filesystem::path& path() const { return path_; }
 
     // Dotted-path getters. Throw if the key is missing and no default is given.
     template <typename T>
@@ -50,16 +45,6 @@ public:
         } catch (...) {
             return fallback;
         }
-    }
-
-    std::optional<std::string> env(const std::string& dotted) const {
-        // Look up "<dotted>_env" and resolve the resulting environment variable.
-        YAML::Node n = traverse(dotted + "_env");
-        if (!n || !n.IsDefined()) return std::nullopt;
-        std::string var = n.as<std::string>();
-        const char* v = std::getenv(var.c_str());
-        if (!v) return std::nullopt;
-        return std::string(v);
     }
 
 private:

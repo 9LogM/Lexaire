@@ -1,8 +1,34 @@
+# Secrets
+.env
+.env.*
+
+# Git / editor / OS
 .git/
-.gitignore
 .gitattributes
+.gitignore
 .dockerignore
 .vscode/
 .idea/
+.claude/
+
+# Build artifacts and runtime output
+build/
+build-*/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+*.log
+maps/
+recordings/
+
+# Local-only subtrees
+python/tests/
+python/tools/
+RS-L515-Docker/
+
+# Docs
 LICENSE
 README.md

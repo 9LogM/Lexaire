@@ -51,16 +51,13 @@ std::string summarize_scene(const std::string& header) {
         if (!dets.is_array() || dets.empty()) return "no detections";
 
         std::ostringstream ss;
-        ss << dets.size() << " detection" << (dets.size() == 1 ? "" : "s");
-        if (!dets.empty()) {
-            ss << " (";
-            for (std::size_t i = 0; i < dets.size() && i < 3; ++i) {
-                if (i) ss << ", ";
-                ss << dets[i].value("label", "?");
-            }
-            if (dets.size() > 3) ss << ", ...";
-            ss << ")";
+        ss << dets.size() << " detection" << (dets.size() == 1 ? "" : "s") << " (";
+        for (std::size_t i = 0; i < dets.size() && i < 3; ++i) {
+            if (i) ss << ", ";
+            ss << dets[i].value("label", "?");
         }
+        if (dets.size() > 3) ss << ", ...";
+        ss << ")";
         return ss.str();
     } catch (...) {
         return "parse error";

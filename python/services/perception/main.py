@@ -1,14 +1,12 @@
 """
 Perception service.
 
-Subscribes to the sensor streams (RGB, depth, IMU) emitted by the L515
-container on the Pi, throttles to `perception.tick_hz`, runs a detector
-on the latest synchronized frameset, and publishes a SceneHeader message
-on `services.perception_scene_pub`.
-
-The orchestrator subscribes to the scene channel and may independently
-reason on pixels via a VLM. This service exists to provide a cheap,
-always-available scene graph at a stable tick rate.
+Subscribes to the RGB and depth streams from the Pi-side L515 publisher,
+throttles to `perception.tick_hz`, runs a detector on the latest
+synchronized frameset, and publishes a SceneHeader on
+`services.perception_scene_pub`. Provides a cheap, always-available scene
+graph at a stable tick rate; the orchestrator may still reason on pixels
+directly via its own VLM.
 """
 
 from __future__ import annotations
@@ -32,20 +30,17 @@ def cli() -> int:
     p.add_argument("--once", action="store_true", help="produce one scene then exit (for tests)")
     args = p.parse_args()
 
-    log = logs.configure("perception")
     cfg = load_config(args.config)
+    log = logs.configure("perception", cfg.get("logging.level", "INFO"))
 
     tick_hz = float(cfg.get("perception.tick_hz", 2.0))
-    scene_pub_ep = cfg.require("services.perception_scene_pub") if False else cfg.get(
-        "services.perception_scene_pub", "tcp://127.0.0.1:6100"
-    )
+    scene_pub_ep = cfg.get("services.perception_scene_pub", "tcp://127.0.0.1:6100")
 
     detector = build_detector(cfg)
 
     sub = SensorSubscriber(
         rgb_endpoint=cfg.sensor.channels.rgb,
         depth_endpoint=cfg.sensor.channels.depth,
-        imu_endpoint=cfg.sensor.channels.imu,
     )
     pub = transport.pub(scene_pub_ep)
 

@@ -13,19 +13,23 @@ dependencies = [
     "zstandard>=0.22",
     "pillow>=10",
     "pyyaml>=6",
-    "python-dotenv>=1",
 ]
 
 [project.optional-dependencies]
 gemini = [
-    "google-generativeai>=0.8",
+    "google-genai>=1.0",
 ]
 perception = [
     "opencv-python-headless>=4.10",
 ]
+detector-yolo = [
+    "ultralytics>=8.3",
+]
+stt-whisper = [
+    "faster-whisper>=1.0",
+]
 dev = [
     "pytest>=8",
-    "pytest-asyncio>=0.23",
     "pytest-timeout>=2",
 ]
 
@@ -41,4 +45,3 @@ include = ["lexaire*", "services*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
