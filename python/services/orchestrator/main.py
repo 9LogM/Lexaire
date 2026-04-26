@@ -18,6 +18,7 @@ Threads:
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import queue
 import signal
@@ -61,6 +62,11 @@ class Orchestrator:
 
         self.latest_telem: dict = {}
         self.latest_telem_lock = threading.Lock()
+        # Telemetry ring buffer (oldest -> newest), pruned by wallclock age in
+        # _run_telemetry_thread. Configured depth in seconds; the buffer
+        # holds however many samples the bridge published in that window.
+        self._telem_history_s = float(cfg.get("orchestrator.telemetry_history_seconds", 5.0))
+        self._telem_history: collections.deque = collections.deque()
 
         # Hold onto the latest frame so the VLM sees current pixels.
         self.sub = SensorSubscriber(
@@ -179,8 +185,16 @@ class Orchestrator:
             try:
                 frame = self.telem_sub.recv()
                 hdr = decode_header(frame)
+                now = time.monotonic()
                 with self.latest_telem_lock:
                     self.latest_telem = hdr
+                    self._telem_history.append((now, hdr))
+                    # Prune samples older than the configured window. The
+                    # bridge publishes at ~10 Hz so the buffer naturally
+                    # grows to ~10*window-seconds entries.
+                    cutoff = now - self._telem_history_s
+                    while self._telem_history and self._telem_history[0][0] < cutoff:
+                        self._telem_history.popleft()
             except Exception as e:
                 self.log.warning("telem decode error: %s", e)
 
@@ -235,6 +249,7 @@ class Orchestrator:
             scene = dict(self.latest_scene)
         with self.latest_telem_lock:
             telem = dict(self.latest_telem)
+            telem_hist = [hdr for (_t, hdr) in self._telem_history]
         with self.latest_fs_lock:
             rgb = self.latest_fs.rgb.copy() if self.latest_fs is not None else None
         return VlmContext(
@@ -244,6 +259,7 @@ class Orchestrator:
             rgb=rgb,
             history=list(self.history),
             safety=dict(self.safety_snapshot),
+            telemetry_history=telem_hist,
         )
 
     def _dispatch_tool_call(self, tc: ToolCall) -> ToolResult:

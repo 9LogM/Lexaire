@@ -126,18 +126,44 @@ class GeminiVLM(VLM):
         telem = ctx.telemetry or {}
         safety = ctx.safety or {}
 
-        return (
+        # Compact recent telemetry trend — only the fields that matter for
+        # decision-making, downsampled to ~5 samples to keep the prompt small.
+        trend_keys = ("rel_alt_m", "ground_speed_mps", "battery_pct", "flight_mode", "armed")
+        history = ctx.telemetry_history or []
+        if len(history) > 5:
+            step = max(1, len(history) // 5)
+            history = history[::step]
+        trend = [
+            {k: h.get(k) for k in trend_keys if h.get(k) is not None}
+            for h in history
+        ]
+
+        parts = [
             "You are the pilot. Use the tools to satisfy the pilot's spoken command "
             "while respecting the safety envelope (the flight bridge enforces it "
-            "below you; ignore it at your peril).\n\n"
-            f"Pilot command: {ctx.user_command!r}\n\n"
-            f"Scene (local detector): {_json.dumps(scene_compact)}\n\n"
-            f"Telemetry: {_json.dumps({k: telem.get(k) for k in ('connected','armed','flight_mode','rel_alt_m','yaw_deg','ground_speed_mps')})}\n\n"
-            f"Safety envelope: {_json.dumps(safety)}\n\n"
+            "below you; ignore it at your peril).",
+            "",
+            f"Pilot command: {ctx.user_command!r}",
+            "",
+            f"Scene (local detector): {_json.dumps(scene_compact)}",
+            "",
+            f"Telemetry now: {_json.dumps({k: telem.get(k) for k in ('connected','armed','flight_mode','rel_alt_m','yaw_deg','ground_speed_mps','battery_pct')})}",
+        ]
+        if trend:
+            parts.append(f"Telemetry trend (oldest→newest): {_json.dumps(trend)}")
+        if ctx.mission:
+            parts.append(f"Active mission: {_json.dumps(ctx.mission)}")
+        parts.extend([
+            "",
+            f"Safety envelope: {_json.dumps(safety)}",
+            "",
             "If the command is ambiguous or unsafe, call `hold`. If the pilot says anything that "
             "sounds like an emergency stop, call `abort`. Otherwise, reason about the RGB frame "
-            "plus the scene list and emit the tool calls needed to satisfy the command."
-        )
+            "plus the scene list and emit the tool calls needed to satisfy the command. "
+            "When a mission is active, prefer one tool call per turn — you'll be re-prompted "
+            "after each call so you can react to the result before the next step.",
+        ])
+        return "\n".join(parts)
 
 
 _SYSTEM_PROMPT = (
