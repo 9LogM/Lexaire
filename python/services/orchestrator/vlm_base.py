@@ -24,10 +24,10 @@ class VlmContext:
     safety: dict = field(default_factory=dict)
     # Recent telemetry samples (oldest -> newest) so the VLM can reason about
     # trends — battery dropping, approaching geofence, altitude unstable.
-    # Phase 2A; depth controlled by orchestrator.telemetry_history_seconds.
+    # Depth is bounded by orchestrator.telemetry_history_seconds.
     telemetry_history: list[dict] = field(default_factory=list)
-    # Active multi-step mission, if any. None when the orchestrator is idle.
-    # Phase 2A; populated when the orchestrator is running a re-prompt loop.
+    # Active multi-step mission, if any. None when the orchestrator is idle;
+    # populated for each re-prompt while a mission is in flight.
     mission: Optional[dict] = None
 
 

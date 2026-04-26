@@ -3,19 +3,37 @@ services:
     build: .
     image: lexaire-cpp:latest
     container_name: lexaire
+    # The TUI is the user-facing entry point; running `docker compose run
+    # --rm lexaire` should bring up the whole GCS stack automatically.
+    # depends_on enforces start order, not readiness — that's fine since
+    # ZMQ PUB/SUB tolerates a late-binding subscriber.
+    depends_on:
+      - perception
+      - orchestrator
+      - flight-bridge
+    # `required: false` so the TUI still starts when .env is missing —
+    # the pre-flight check then tells the user it's missing instead of
+    # compose failing before the TUI ever renders.
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./common:/workspace/common:ro
       - ~/.ssh:/mnt/ssh:ro
+      # The TUI auto-deploys the relay to the Pi at startup via SSH. The
+      # daemon socket mount lets it also query local container state for
+      # the header indicator. Trade-off: anything in this container has
+      # full docker control over the host. Acceptable for an operator tool.
+      - /var/run/docker.sock:/var/run/docker.sock
 
   flight-bridge:
     image: lexaire-cpp:latest
-    depends_on:
-      - lexaire
     container_name: lexaire-flight-bridge
     entrypoint: []
-    # --dummy is the default; override command (and add extra_hosts for
-    # drone.local) in docker-compose.override.yaml for live-hardware runs.
-    command: ["/workspace/build/lexaire-flight-bridge", "--dummy"]
+    command: ["/workspace/build/lexaire-flight-bridge"]
+    # docker-compose.override.yaml supplies the extra_hosts that map
+    # drone.local to the Pi's IP — every operator's network is different,
+    # so it stays out of the committed file.
     volumes:
       - ./common:/workspace/common:ro
 
@@ -25,7 +43,9 @@ services:
       dockerfile: python/Dockerfile
     image: lexaire-python:latest
     container_name: lexaire-perception
-    env_file: [.env]
+    env_file:
+      - path: .env
+        required: false
     command: ["lexaire-perception"]
     volumes:
       - ./common:/workspace/common:ro
@@ -35,7 +55,9 @@ services:
     depends_on:
       - perception
     container_name: lexaire-orchestrator
-    env_file: [.env]
+    env_file:
+      - path: .env
+        required: false
     command: ["lexaire-orchestrator"]
     volumes:
       - ./common:/workspace/common:ro
@@ -46,7 +68,9 @@ services:
     profiles: ["tools"]
     stdin_open: true
     tty: true
-    env_file: [.env]
+    env_file:
+      - path: .env
+        required: false
     entrypoint: ["lexaire-stt"]
     volumes:
       - ./common:/workspace/common:ro
@@ -55,7 +79,9 @@ services:
   replay:
     image: lexaire-python:latest
     profiles: ["tools"]
-    env_file: [.env]
+    env_file:
+      - path: .env
+        required: false
     entrypoint: ["lexaire-replay"]
     volumes:
       - ./common:/workspace/common:ro

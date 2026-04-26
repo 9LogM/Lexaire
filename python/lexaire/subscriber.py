@@ -42,6 +42,7 @@ class SensorSubscriber:
 
     def __init__(
         self,
+        ctx: zmq.Context,
         rgb_endpoint: str,
         depth_endpoint: str,
         *,
@@ -51,7 +52,7 @@ class SensorSubscriber:
         self.depth_ep = depth_endpoint
         self.buffer_size = buffer_size
 
-        self._ctx = zmq.Context.instance()
+        self._ctx = ctx
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._zdecomp = zstd.ZstdDecompressor()
@@ -89,6 +90,13 @@ class SensorSubscriber:
     def get_nowait(self) -> Optional[Frameset]:
         try:
             return self._out.get_nowait()
+        except queue.Empty:
+            return None
+
+    def get(self, timeout: float) -> Optional[Frameset]:
+        """Block up to `timeout` seconds for the next Frameset, None on timeout."""
+        try:
+            return self._out.get(timeout=timeout)
         except queue.Empty:
             return None
 
@@ -161,12 +169,15 @@ class SensorSubscriber:
                 try:
                     self._out.put(fs, timeout=0.1)
                 except queue.Full:
-                    # downstream too slow; drop oldest
+                    # Drop oldest; sustained drops mean the consumer can't keep up.
                     try:
-                        self._out.get_nowait()
+                        dropped = self._out.get_nowait()
                         self._out.put_nowait(fs)
-                    except Exception:
-                        pass
+                        log.warning("frameset queue full; dropped seq=%d for seq=%d",
+                                    dropped.seq, fs.seq)
+                    except (queue.Empty, queue.Full) as e:
+                        log.warning("frameset queue churn (seq=%d): %s; frame dropped",
+                                    fs.seq, e.__class__.__name__)
             with self._new_frame:
                 self._new_frame.wait(timeout=0.1)
 

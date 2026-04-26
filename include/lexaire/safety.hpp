@@ -46,7 +46,15 @@ inline SafetyDecision check_tool(const std::string& name,
                                   const nlohmann::json& args,
                                   const SafetyEnvelope& env,
                                   const SafetyState& state) {
-    if (state.aborted.load()) return {false, "abort_active"};
+    // Kill is the strictly-worse escalation of abort — if abort fires and
+    // the pilot then sees they need a motor-cut after all, the gate must
+    // not get in the way. Same logic for `land` — if abort somehow didn't
+    // produce a descent (e.g. PX4 rejected the mode), the pilot's follow-up
+    // land must reach the bridge.
+    const bool is_emergency_followup = (name == "kill" || name == "land");
+    if (state.aborted.load() && !is_emergency_followup) {
+        return {false, "abort_active"};
+    }
 
     if ((name == "arm" || name == "takeoff") &&
         env.require_spoken_arm && !state.armed_with_voice.load()) {

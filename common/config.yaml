@@ -45,16 +45,12 @@ safety:
   heartbeat_loss_threshold_s: 2.0
 
 orchestrator:
-  # If no successful tool call to the bridge within N seconds, flip status
-  # to "bridge_offline" and reject further calls until the bridge replies.
-  bridge_offline_threshold_s: 3.0
   # Telemetry ring-buffer depth (seconds of history retained for the VLM).
   telemetry_history_seconds:  5.0
   # Hard cap on a mission's re-prompt loop. Bounds Gemini calls per mission.
   mission_max_steps:          10
-  # Tick-based wakeup rate while a mission is active. The orchestrator
-  # re-evaluates telemetry/scene at this rate even without a new voice
-  # command, so it can react to "approaching geofence" / low battery.
+  # Reserved: tick-based wakeup rate for a future "watch telemetry while
+  # idle and react proactively" feature. Not yet read by the orchestrator.
   mission_tick_hz:            1.0
 
 services:

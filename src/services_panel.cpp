@@ -67,11 +67,17 @@ std::string summarize_scene(const std::string& header) {
 std::string summarize_telemetry(const std::string& header) {
     try {
         auto j = nlohmann::json::parse(header);
-        bool connected = j.value("connected", false);
-        if (!connected) return "disconnected";
+        const bool connected = j.value("connected", false);
+        const std::string mode = j.value("flight_mode", "");
+
+        // "no autopilot" needs cable/relay; "timeout" needs FC power/RC.
+        if (!connected) {
+            if (mode == "NO_AUTOPILOT") return "no autopilot at startup";
+            return "autopilot heartbeat timeout";
+        }
 
         std::ostringstream ss;
-        ss << j.value("flight_mode", "?");
+        ss << mode;
         ss << " / " << (j.value("armed", false) ? "armed" : "disarmed");
         if (j.contains("rel_alt_m") && !j["rel_alt_m"].is_null()) {
             ss << " / " << j["rel_alt_m"].get<double>() << " m";
@@ -83,6 +89,48 @@ std::string summarize_telemetry(const std::string& header) {
     } catch (...) {
         return "parse error";
     }
+}
+
+// Optional fields gate the has_* booleans so missing data renders as N/A
+// rather than zero.
+void parse_telemetry(const std::string& header, TelemetrySnapshot& out) {
+    out = TelemetrySnapshot{};
+    auto j = nlohmann::json::parse(header, nullptr, /*allow_exceptions*/ false);
+    if (!j.is_object()) return;
+
+    out.connected     = j.value("connected",     false);
+    out.qgc_connected = j.value("qgc_connected", false);
+    out.armed         = j.value("armed",         false);
+    out.flight_mode   = j.value("flight_mode",   std::string{"N/A"});
+
+    if (j.contains("battery_pct") && !j["battery_pct"].is_null()) {
+        out.has_battery = true;
+        out.battery_pct = j["battery_pct"].get<int>();
+    }
+    if (j.contains("battery_v") && !j["battery_v"].is_null() && !out.has_battery) {
+        out.has_battery = true;
+    }
+    if (j.contains("battery_v") && !j["battery_v"].is_null()) {
+        out.battery_v = j["battery_v"].get<float>();
+    }
+
+    if (j.contains("lat") && !j["lat"].is_null() &&
+        j.contains("lon") && !j["lon"].is_null()) {
+        out.has_fix   = true;
+        out.latitude  = j["lat"].get<double>();
+        out.longitude = j["lon"].get<double>();
+    }
+    if (j.contains("abs_alt_m") && !j["abs_alt_m"].is_null()) {
+        out.abs_alt_m = j["abs_alt_m"].get<float>();
+    }
+    if (j.contains("rel_alt_m") && !j["rel_alt_m"].is_null()) {
+        out.rel_alt_m = j["rel_alt_m"].get<float>();
+    }
+
+    out.roll_deg   = j.value("roll_deg",         0.0f);
+    out.pitch_deg  = j.value("pitch_deg",        0.0f);
+    out.yaw_deg    = j.value("yaw_deg",          0.0f);
+    out.ground_spd = j.value("ground_speed_mps", 0.0f);
 }
 
 std::pair<std::string, std::string> parse_orch(const std::string& header) {
@@ -169,9 +217,12 @@ void ServicesWatcher::run() {
         }
         if ((items[1].revents & ZMQ_POLLIN) && telem && recv_header_only(telem, hdr)) {
             auto summary = summarize_telemetry(hdr);
+            TelemetrySnapshot parsed;
+            parse_telemetry(hdr, parsed);
             std::lock_guard<std::mutex> lk(mu_);
             snap_.telemetry_last_ns = mono_ns();
             snap_.telemetry_summary = std::move(summary);
+            snap_.telemetry         = std::move(parsed);
         }
         if ((items[2].revents & ZMQ_POLLIN) && orch && recv_header_only(orch, hdr)) {
             auto [state, thought] = parse_orch(hdr);

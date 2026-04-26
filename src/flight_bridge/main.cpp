@@ -3,17 +3,12 @@
 // Connects to PX4 via MAVSDK and exposes a JSON tool-call interface on a ZMQ
 // REP socket. Broadcasts telemetry on a PUB socket. Every tool call is
 // gated by the non-overridable safety envelope from include/lexaire/safety.hpp.
-//
-// CLI:
-//   lexaire-flight-bridge           # live — connects to the drone
-//   lexaire-flight-bridge --dummy   # dummy — logs intent, does not command the drone
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
-#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -24,6 +19,7 @@
 #include <mavsdk/plugins/action/action.h>
 #include <mavsdk/plugins/offboard/offboard.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
+#include <mavsdk/mavlink_include.h>
 
 #include <zmq.h>
 
@@ -34,10 +30,13 @@
 
 using lexaire::json;
 
-static std::atomic<bool> g_stop{false};
-static void on_sigint(int) { g_stop.store(true); }
+// std::atomic_flag is the only atomic type the C++ standard guarantees is
+// lock-free, so it's the only one that's truly async-signal-safe.
+static std::atomic_flag g_stop = ATOMIC_FLAG_INIT;
+static void on_sigint(int) { g_stop.test_and_set(); }
+static bool stop_requested() { return g_stop.test(); }
 
-static int run(bool dummy) {
+static int run() {
     auto cfg = lexaire::Config::load();
     lexaire::SafetyEnvelope env  = lexaire::SafetyEnvelope::from_config(cfg);
     lexaire::SafetyState    state;
@@ -46,21 +45,18 @@ static int run(bool dummy) {
     const std::string telemetry_ep = cfg.require<std::string>("services.telemetry_pub");
     const std::string mavsdk_uri   = cfg.require<std::string>("drone.mavsdk_udp");
 
-    // Phase 2A: heartbeat-loss recovery. If the MAVSDK autopilot connection
-    // drops while armed, the bridge auto-issues an RTL or HOLD after a
-    // configurable threshold. Default rtl@2.0s.
+    // Heartbeat-loss recovery thresholds — see the watchdog thread below
+    // for what these gate.
     const double hb_threshold_s = cfg.get_or<double>("safety.heartbeat_loss_threshold_s", 2.0);
     const std::string hb_action = cfg.get_or<std::string>("safety.heartbeat_loss_action", "rtl");
 
     std::fprintf(stderr,
-                 "[flight-bridge] starting  rep=%s  telemetry=%s  mode=%s  "
+                 "[flight-bridge] starting  rep=%s  telemetry=%s  "
                  "heartbeat-loss: action=%s threshold=%.1fs\n",
-                 rep_ep.c_str(), telemetry_ep.c_str(), dummy ? "DUMMY" : "LIVE",
+                 rep_ep.c_str(), telemetry_ep.c_str(),
                  hb_action.c_str(), hb_threshold_s);
 
-    // MAVSDK setup.
     lexaire::FlightCtx ctx;
-    ctx.dummy = dummy;
     ctx.safety = &state;
 
     // PX4 only routes STATUSTEXT to peers whose heartbeat advertises
@@ -68,32 +64,50 @@ static int run(bool dummy) {
     // calls — so GCS is the correct identity.
     // Ref: discuss.px4.io/t/cant-receive-mavlink-253-statustext-message-via-companion-link-since-1-6-4/5429
     mavsdk::Mavsdk sdk{mavsdk::Mavsdk::Configuration{mavsdk::ComponentType::GroundStation}};
-    if (!dummy) {
-        if (sdk.add_any_connection(mavsdk_uri) != mavsdk::ConnectionResult::Success) {
-            std::fprintf(stderr, "[flight-bridge] MAVSDK connection to %s failed\n", mavsdk_uri.c_str());
-            return 2;
-        }
-        // Wait up to 5s for a system; if none appears, handlers return errors.
-        for (int i = 0; i < 50 && !g_stop.load(); ++i) {
-            for (auto& s : sdk.systems()) if (s->has_autopilot()) { ctx.system = s; break; }
-            if (ctx.system) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (ctx.system) {
-            ctx.action    = std::make_unique<mavsdk::Action>(ctx.system);
-            ctx.offboard  = std::make_unique<mavsdk::Offboard>(ctx.system);
-            ctx.param     = std::make_unique<mavsdk::Param>(ctx.system);
-            ctx.telemetry = std::make_unique<mavsdk::Telemetry>(ctx.system);
-            // Hold the handle — MAVSDK unsubscribes when the returned handle
-            // goes out of scope, dropping all STATUSTEXT lines silently.
-            ctx.status_text_handle = ctx.telemetry->subscribe_status_text(
-                [](mavsdk::Telemetry::StatusText st) {
-                    std::fprintf(stderr, "[px4] %s\n", st.text.c_str());
-                });
-            std::fprintf(stderr, "[flight-bridge] autopilot connected\n");
-        } else {
-            std::fprintf(stderr, "[flight-bridge] no autopilot found in 5s — handlers will return errors\n");
-        }
+
+    // MAVSDK only enumerates autopilots, so GCS heartbeats are caught off
+    // the raw stream; the telemetry thread reads `last_gcs_hb_ms` against
+    // a freshness window.
+    std::atomic<std::int64_t> last_gcs_hb_ms{0};
+    sdk.intercept_incoming_messages_async(
+        [&last_gcs_hb_ms](mavlink_message_t& msg) -> bool {
+            if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
+                mavlink_heartbeat_t hb;
+                mavlink_msg_heartbeat_decode(&msg, &hb);
+                if (hb.type == MAV_TYPE_GCS) {
+                    auto now = std::chrono::steady_clock::now().time_since_epoch();
+                    last_gcs_hb_ms.store(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+                }
+            }
+            return true;
+        });
+
+    if (sdk.add_any_connection(mavsdk_uri) != mavsdk::ConnectionResult::Success) {
+        std::fprintf(stderr, "[flight-bridge] MAVSDK connection to %s failed\n", mavsdk_uri.c_str());
+        return 2;
+    }
+    // Wait up to 5s for a system; if none appears, handlers return errors
+    // and the telemetry thread reports flight_mode=NO_AUTOPILOT.
+    for (int i = 0; i < 50 && !stop_requested(); ++i) {
+        for (auto& s : sdk.systems()) if (s->has_autopilot()) { ctx.system = s; break; }
+        if (ctx.system) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (ctx.system) {
+        ctx.action    = std::make_unique<mavsdk::Action>(ctx.system);
+        ctx.offboard  = std::make_unique<mavsdk::Offboard>(ctx.system);
+        ctx.param     = std::make_unique<mavsdk::Param>(ctx.system);
+        ctx.telemetry = std::make_unique<mavsdk::Telemetry>(ctx.system);
+        // Hold the handle — MAVSDK unsubscribes when the returned handle
+        // goes out of scope, dropping all STATUSTEXT lines silently.
+        ctx.status_text_handle = ctx.telemetry->subscribe_status_text(
+            [](mavsdk::Telemetry::StatusText st) {
+                std::fprintf(stderr, "[px4] %s\n", st.text.c_str());
+            });
+        std::fprintf(stderr, "[flight-bridge] autopilot connected\n");
+    } else {
+        std::fprintf(stderr, "[flight-bridge] no autopilot found in 5s — handlers will return errors\n");
     }
 
     // ZMQ: REP for tool calls, PUB for telemetry broadcast.
@@ -114,21 +128,22 @@ static int run(bool dummy) {
         return 3;
     }
 
-    // Heartbeat watchdog. Polls the MAVSDK system's connection state at
-    // 5 Hz; if it stays disconnected past `hb_threshold_s` while the
-    // autopilot reports armed and !on_ground, auto-issue RTL (or HOLD,
-    // configurable). One-shot per disconnection — won't re-fire until the
-    // link comes back.
+    // Polls MAVSDK connection state at 5 Hz. After hb_threshold_s of
+    // disconnection while `armed_with_voice` is true, fires RTL (or HOLD).
+    // One-shot per disconnect — re-arms when the link returns. Skipped if
+    // no autopilot ever connected (nothing to recover).
     //
-    // Skipped when --dummy or no autopilot ever connected (nothing to fly
-    // home).
+    // Why armed_with_voice as the gate: once the link drops we can't read
+    // armed/in-air via MAVSDK, so we use the locally-tracked spoken-arm
+    // state — it's set on a voice-confirmed arm and cleared on disarm,
+    // which approximates "an active armed session was in progress".
     std::thread heartbeat_thread([&]() {
-        if (dummy || !ctx.system || !ctx.action || !ctx.telemetry) return;
+        if (!ctx.system || !ctx.action || !ctx.telemetry) return;
         using namespace std::chrono_literals;
         using clk = std::chrono::steady_clock;
         std::optional<clk::time_point> disconnect_at;
         bool action_fired = false;
-        while (!g_stop.load()) {
+        while (!stop_requested()) {
             std::this_thread::sleep_for(200ms);
             const bool connected = ctx.system->is_connected();
             if (connected) {
@@ -140,11 +155,8 @@ static int run(bool dummy) {
             const double age_s = std::chrono::duration<double>(
                 clk::now() - *disconnect_at).count();
             if (age_s < hb_threshold_s || action_fired) continue;
-            // We can't read armed/in-air via MAVSDK once disconnected, so
-            // gate on the spoken-arm state we maintain locally — it tracks
-            // an active armed session.
             if (!state.armed_with_voice.load()) {
-                action_fired = true;  // suppress spam; nothing to do.
+                action_fired = true;
                 continue;
             }
             std::fprintf(stderr,
@@ -163,17 +175,27 @@ static int run(bool dummy) {
     // Telemetry broadcaster thread.
     std::thread tele_thread([&]() {
         using namespace std::chrono_literals;
-        while (!g_stop.load()) {
+        while (!stop_requested()) {
             lexaire::Telemetry t;
             t.ts_ns = lexaire::now_ns();
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            t.qgc_connected = last_gcs_hb_ms.load() != 0
+                              && (now_ms - last_gcs_hb_ms.load()) < 3000;
+
             if (ctx.telemetry) {
                 t.connected = ctx.system && ctx.system->is_connected();
                 t.armed = ctx.telemetry->armed();
                 t.flight_mode = lexaire::flight_mode_to_string(ctx.telemetry->flight_mode());
                 auto b = ctx.telemetry->battery();
-                // MAVSDK Battery::remaining_percent is already 0..100, not 0..1.
-                t.battery_pct = static_cast<int>(b.remaining_percent);
-                t.battery_v = b.voltage_v;
+                // PX4 returns -1 when battery monitoring is off; skip the
+                // field rather than publish "-1%".
+                if (b.remaining_percent >= 0.0f) {
+                    t.battery_pct = static_cast<int>(b.remaining_percent);
+                }
+                if (b.voltage_v > 0.0f) {
+                    t.battery_v = b.voltage_v;
+                }
                 auto p = ctx.telemetry->position();
                 t.lat = p.latitude_deg;
                 t.lon = p.longitude_deg;
@@ -187,7 +209,7 @@ static int run(bool dummy) {
                 t.ground_speed_mps = std::sqrt(v.north_m_s * v.north_m_s + v.east_m_s * v.east_m_s);
             } else {
                 t.connected = false;
-                t.flight_mode = dummy ? "DUMMY" : "NO_AUTOPILOT";
+                t.flight_mode = "NO_AUTOPILOT";
             }
             std::string payload = t.to_json().dump();
             zmq_send(pub, payload.data(), payload.size(), 0);
@@ -196,7 +218,7 @@ static int run(bool dummy) {
     });
 
     // Main REQ/REP loop. Serial is fine at the orchestrator's command rate.
-    while (!g_stop.load()) {
+    while (!stop_requested()) {
         zmq_pollitem_t items[] = {{rep, 0, ZMQ_POLLIN, 0}};
         int rc = zmq_poll(items, 1, 250);
         if (rc <= 0) continue;
@@ -235,7 +257,7 @@ static int run(bool dummy) {
         zmq_send(rep, reply.data(), reply.size(), 0);
     }
 
-    g_stop.store(true);
+    g_stop.test_and_set();
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
     if (tele_thread.joinable()) tele_thread.join();
     zmq_close(rep);
@@ -245,12 +267,8 @@ static int run(bool dummy) {
     return 0;
 }
 
-int main(int argc, char** argv) {
-    bool dummy = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--dummy") == 0) dummy = true;
-    }
+int main() {
     std::signal(SIGINT, on_sigint);
     std::signal(SIGTERM, on_sigint);
-    return run(dummy);
+    return run();
 }

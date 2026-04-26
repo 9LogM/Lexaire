@@ -117,7 +117,7 @@ The ground station's `docker compose up -d` brings up four services beyond the C
 |---|---|---|
 | `perception` | [`python/services/perception/`](python/services/perception/) | Subscribes to the L515 RGB+depth streams, runs YOLO11 on each frame, publishes a scene graph (label + bbox + camera-frame xyz) at `perception.tick_hz`. |
 | `orchestrator` | [`python/services/orchestrator/`](python/services/orchestrator/) | Pulls voice commands from the STT service, fuses them with the latest scene + telemetry + RGB frame, calls the Gemini 2.5 Flash VLM for a tool-call decision, dispatches the calls to the flight bridge over REQ/REP. |
-| `flight-bridge` (C++) | [`src/flight_bridge/`](src/flight_bridge/) | MAVSDK-backed tool dispatcher. Enforces the non-overridable safety envelope ([`include/lexaire/safety.hpp`](include/lexaire/safety.hpp)) below the tool-call layer. Defaults to `--dummy` (logs intent, doesn't command MAVSDK) for desk testing. |
+| `flight-bridge` (C++) | [`src/flight_bridge/`](src/flight_bridge/) | MAVSDK-backed tool dispatcher. Enforces the non-overridable safety envelope ([`include/lexaire/safety.hpp`](include/lexaire/safety.hpp)) below the tool-call layer. |
 | `stt` | [`python/services/stt/`](python/services/stt/) | Voice command source. Modes: text-input via stdin / `--once` / `--from-file`, or `--audio-file` for pre-recorded WAV (uses `faster-whisper`). Mic capture is a follow-up. Profile-gated: `docker compose --profile tools run --rm stt --once "land"`. |
 | `replay` | [`python/services/replay/`](python/services/replay/) | Field-debug tool: SUBs the live sensor channels and writes a JSONL recording (`record`), or replays one back as PUBs (`play`). Profile-gated. |
 
@@ -160,8 +160,8 @@ Everything lives in [`common/config.yaml`](common/config.yaml). Key fields:
 
 Lexaire ships in phases:
 
-- **Phase 1 (this branch)** — Perception + orchestrator + flight bridge end-to-end on a desk in `--dummy` mode. ✅
-- **Phase 2** — First flight: drop `--dummy`, add multi-step missions, telemetry-aware reasoning, recovery on connection loss. See [`docs/phase-2.md`](docs/phase-2.md).
+- **Phase 1** — Perception + orchestrator + flight bridge end-to-end against a desk autopilot. ✅
+- **Phase 2** — First flight: multi-step missions, telemetry-aware reasoning, recovery on connection loss. See [`docs/phase-2.md`](docs/phase-2.md).
 - **Phase 3** — Live microphone capture for STT.
 - **Phase 4** — RTAB-Map SLAM for persistent spatial memory ("go back to the table you saw earlier").
 

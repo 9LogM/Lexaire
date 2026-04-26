@@ -67,7 +67,6 @@ ToolResult err(const std::string& req, const std::string& msg) {
 // ---- Individual handlers ----
 
 ToolResult handle_arm(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] arm\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->arm();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -75,7 +74,6 @@ ToolResult handle_arm(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] disarm\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->disarm();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -84,7 +82,6 @@ ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) {
 
 ToolResult handle_takeoff(const ToolCall& c, FlightCtx& ctx) {
     double alt = c.args.value("altitude_m", 1.5);
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] takeoff alt=%.2f\n", alt); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     ctx.action->set_takeoff_altitude(static_cast<float>(alt));
     auto r = ctx.action->takeoff();
@@ -93,7 +90,6 @@ ToolResult handle_takeoff(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_land(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] land\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->land();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -101,7 +97,6 @@ ToolResult handle_land(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_rtl(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] rtl\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->return_to_launch();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -109,7 +104,6 @@ ToolResult handle_rtl(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_hold(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] hold\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->hold();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -121,10 +115,6 @@ ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
     double e = c.args.value("e", 0.0);
     double d = c.args.value("d", 0.0);
     double yaw = c.args.value("yaw_deg", 0.0);
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] goto_ned n=%.2f e=%.2f d=%.2f yaw=%.1f\n", n, e, d, yaw);
-        return ok(c.request_id);
-    }
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
     Offboard::PositionNedYaw p{static_cast<float>(n), static_cast<float>(e),
                                  static_cast<float>(d), static_cast<float>(yaw)};
@@ -139,10 +129,6 @@ ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
     double vy = c.args.value("vy", 0.0);
     double vz = c.args.value("vz", 0.0);
     double yr = c.args.value("yaw_rate_deg_s", 0.0);
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] set_velocity_ned vx=%.2f vy=%.2f vz=%.2f yr=%.1f\n", vx, vy, vz, yr);
-        return ok(c.request_id);
-    }
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
     Offboard::VelocityNedYaw v{static_cast<float>(vx), static_cast<float>(vy),
                                  static_cast<float>(vz), static_cast<float>(yr)};
@@ -152,24 +138,20 @@ ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
     return err(c.request_id, offboard_result_to_string(r));
 }
 
-// `abort` is the user-driven safe-stop: pilot voice says "abort", we want a
-// controlled descent + motors-off-on-touchdown, not a free fall. For an
-// instant motor-cut emergency, see `handle_kill`.
+// Pilot-voice safe-stop: controlled descent and disarm-on-touchdown.
+// For an instant motor-cut, see `handle_kill`.
 ToolResult handle_abort(const ToolCall& c, FlightCtx& ctx) {
     if (ctx.safety) ctx.safety->aborted.store(true);
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] abort -> land\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->land();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
 }
 
-// `kill` cuts motors instantly. Reserved for emergencies where a controlled
-// descent is unsafe (e.g. drone is about to hit a person). Sets the same
-// aborted flag so subsequent tool calls are gated.
+// Instant motor cut. Reserved for emergencies where a controlled descent
+// is unsafe (e.g. drone about to strike a person).
 ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
     if (ctx.safety) ctx.safety->aborted.store(true);
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] kill -> motors off\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->kill();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -180,10 +162,6 @@ ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
 ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     std::string name = c.args.value("name", "");
     if (name.empty()) return err(c.request_id, "missing_param_name");
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] set_param %s\n", name.c_str());
-        return ok(c.request_id);
-    }
     if (!ctx.param) return err(c.request_id, "param_not_initialized");
 
     if (c.args.contains("int_value")) {
@@ -233,10 +211,6 @@ ToolResult handle_get_telemetry(const ToolCall& c, FlightCtx& ctx) {
 // proof-of-life check passes before a follow-up arm.
 // Ref: docs.px4.io/main/en/flight_modes/offboard
 ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] enable_offboard\n");
-        return ok(c.request_id);
-    }
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
 
     Offboard::VelocityNedYaw zero{0.0f, 0.0f, 0.0f, 0.0f};
@@ -253,7 +227,6 @@ ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
 ToolResult handle_get_param(const ToolCall& c, FlightCtx& ctx) {
     std::string name = c.args.value("name", "");
     if (name.empty()) return err(c.request_id, "missing_param_name");
-    if (ctx.dummy) return err(c.request_id, "dummy_mode");
     if (!ctx.param) return err(c.request_id, "param_not_initialized");
     auto [r, v] = ctx.param->get_param_int(name);
     if (r == Param::Result::Success) {

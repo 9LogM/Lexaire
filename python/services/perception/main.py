@@ -16,6 +16,8 @@ import dataclasses
 import signal
 import time
 
+import zmq
+
 from lexaire import logs, transport
 from lexaire.config import load_config
 from lexaire.messages import SceneHeader, encode_header
@@ -34,15 +36,17 @@ def cli() -> int:
     log = logs.configure("perception", cfg.get("logging.level", "INFO"))
 
     tick_hz = float(cfg.get("perception.tick_hz", 2.0))
-    scene_pub_ep = cfg.get("services.perception_scene_pub", "tcp://127.0.0.1:6100")
+    scene_pub_ep = cfg.require("services.perception_scene_pub")
 
     detector = build_detector(cfg)
 
+    ctx = zmq.Context()
     sub = SensorSubscriber(
+        ctx,
         rgb_endpoint=cfg.sensor.channels.rgb,
         depth_endpoint=cfg.sensor.channels.depth,
     )
-    pub = transport.pub(scene_pub_ep)
+    pub = transport.pub(ctx, scene_pub_ep)
 
     stop = False
     def _stop(*_):
@@ -98,6 +102,7 @@ def cli() -> int:
     finally:
         sub.stop()
         pub.close()
+        ctx.term()
         log.info("perception shutdown")
     return 0
 

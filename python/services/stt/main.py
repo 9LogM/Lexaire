@@ -28,6 +28,8 @@ import sys
 import threading
 import time
 
+import zmq
+
 from lexaire import logs, transport
 from lexaire.config import load_config
 from lexaire.messages import VoiceCommand, encode_header, now_ns
@@ -44,9 +46,8 @@ class SttService:
         self._whisper = None
 
         self.abort_kw = cfg.get("stt.abort_keyword", "abort").lower().strip()
-        self.push = transport.push(cfg.get(
-            "services.orchestrator_command_pull", "tcp://127.0.0.1:6200"
-        ))
+        self._zmq = zmq.Context()
+        self.push = transport.push(self._zmq, cfg.require("services.orchestrator_command_pull"))
 
     def _get_whisper(self):
         if self._whisper is not None:
@@ -65,6 +66,7 @@ class SttService:
     def stop(self):
         self.stop_event.set()
         self.push.close()
+        self._zmq.term()
 
     # -- Send -----------------------------------------------------------------
 

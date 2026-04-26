@@ -63,11 +63,12 @@ def _sleep_monotonic(target_ns: int, stop: threading.Event) -> None:
 
 def _run_record(cfg, args, log, stop: threading.Event) -> int:
     channels = {
-        "rgb":   cfg.get("sensor.channels.rgb"),
-        "depth": cfg.get("sensor.channels.depth"),
-        "imu":   cfg.get("sensor.channels.imu"),
+        "rgb":   cfg.require("sensor.channels.rgb"),
+        "depth": cfg.require("sensor.channels.depth"),
+        "imu":   cfg.require("sensor.channels.imu"),
     }
-    subs = {name: transport.sub(ep) for name, ep in channels.items()}
+    ctx = zmq.Context()
+    subs = {name: transport.sub(ctx, ep) for name, ep in channels.items()}
     poller = zmq.Poller()
     for s in subs.values():
         poller.register(s, zmq.POLLIN)
@@ -77,32 +78,34 @@ def _run_record(cfg, args, log, stop: threading.Event) -> int:
     start = time.monotonic_ns()
     deadline_ns = start + int(args.max_seconds * 1e9) if args.max_seconds > 0 else 0
 
-    with open(args.path, "w", encoding="utf-8") as fp:
-        while not stop.is_set():
-            if deadline_ns and time.monotonic_ns() >= deadline_ns:
-                log.info("max-seconds reached — stopping")
-                break
-            events = dict(poller.poll(250))
-            for name, sock in subs.items():
-                if sock in events:
-                    parts = sock.recv_multipart()
-                    if len(parts) < 2:
-                        continue
-                    header = json.loads(parts[0].decode("utf-8"))
-                    rec = Record(
-                        channel=name,
-                        ts_ns=time.monotonic_ns(),
-                        header=header,
-                        payload=bytes(parts[1]),
-                    )
-                    write(fp, rec)
-                    count += 1
-                    if count % 30 == 0:
-                        fp.flush()
-
-    log.info("recorded %d frames", count)
-    for s in subs.values():
-        s.close()
+    try:
+        with open(args.path, "w", encoding="utf-8") as fp:
+            while not stop.is_set():
+                if deadline_ns and time.monotonic_ns() >= deadline_ns:
+                    log.info("max-seconds reached — stopping")
+                    break
+                events = dict(poller.poll(250))
+                for name, sock in subs.items():
+                    if sock in events:
+                        parts = sock.recv_multipart()
+                        if len(parts) < 2:
+                            continue
+                        header = json.loads(parts[0].decode("utf-8"))
+                        rec = Record(
+                            channel=name,
+                            ts_ns=time.monotonic_ns(),
+                            header=header,
+                            payload=bytes(parts[1]),
+                        )
+                        write(fp, rec)
+                        count += 1
+                        if count % 30 == 0:
+                            fp.flush()
+    finally:
+        log.info("recorded %d frames", count)
+        for s in subs.values():
+            s.close()
+        ctx.term()
     return 0
 
 
@@ -111,52 +114,55 @@ def _run_record(cfg, args, log, stop: threading.Event) -> int:
 
 def _run_play(cfg, args, log, stop: threading.Event) -> int:
     endpoints = {
-        "rgb":   _rewrite_host(cfg.get("sensor.channels.rgb"),   args.bind_host),
-        "depth": _rewrite_host(cfg.get("sensor.channels.depth"), args.bind_host),
-        "imu":   _rewrite_host(cfg.get("sensor.channels.imu"),   args.bind_host),
+        "rgb":   _rewrite_host(cfg.require("sensor.channels.rgb"),   args.bind_host),
+        "depth": _rewrite_host(cfg.require("sensor.channels.depth"), args.bind_host),
+        "imu":   _rewrite_host(cfg.require("sensor.channels.imu"),   args.bind_host),
     }
-    pubs = {name: transport.pub(ep) for name, ep in endpoints.items()}
+    ctx = zmq.Context()
+    pubs = {name: transport.pub(ctx, ep) for name, ep in endpoints.items()}
     log.info("replay bound %s", endpoints)
 
     # SUB connect is racy-on-open; give subscribers a beat to connect before we
     # start replaying. (Pattern: slow-joiner problem.)
     time.sleep(0.25)
 
-    records = list(read_all(args.path))
-    if not records:
-        log.warning("no records in %s", args.path)
-        return 0
+    try:
+        records = list(read_all(args.path))
+        if not records:
+            log.warning("no records in %s", args.path)
+            return 0
 
-    if args.loop:
-        log.info("looping replay (%d records per pass)", len(records))
-    log.info("replaying %d records at speed=%.2fx", len(records), args.speed)
+        if args.loop:
+            log.info("looping replay (%d records per pass)", len(records))
+        log.info("replaying %d records at speed=%.2fx", len(records), args.speed)
 
-    pass_num = 0
-    while not stop.is_set():
-        pass_num += 1
-        t_zero_file = records[0].ts_ns
-        t_zero_wall = time.monotonic_ns()
-        speed = max(args.speed, 1e-6)
-        sent = 0
-        for rec in records:
-            if stop.is_set():
+        pass_num = 0
+        while not stop.is_set():
+            pass_num += 1
+            t_zero_file = records[0].ts_ns
+            t_zero_wall = time.monotonic_ns()
+            speed = max(args.speed, 1e-6)
+            sent = 0
+            for rec in records:
+                if stop.is_set():
+                    break
+                offset_ns = int((rec.ts_ns - t_zero_file) / speed)
+                _sleep_monotonic(t_zero_wall + offset_ns, stop)
+                if stop.is_set():
+                    break
+                sock = pubs.get(rec.channel)
+                if sock is None:
+                    continue
+                header_bytes = json.dumps(rec.header, separators=(",", ":")).encode("utf-8")
+                sock.send_multipart([header_bytes, rec.payload], copy=False)
+                sent += 1
+            log.info("pass %d: sent %d records", pass_num, sent)
+            if not args.loop:
                 break
-            offset_ns = int((rec.ts_ns - t_zero_file) / speed)
-            _sleep_monotonic(t_zero_wall + offset_ns, stop)
-            if stop.is_set():
-                break
-            sock = pubs.get(rec.channel)
-            if sock is None:
-                continue
-            header_bytes = json.dumps(rec.header, separators=(",", ":")).encode("utf-8")
-            sock.send_multipart([header_bytes, rec.payload], copy=False)
-            sent += 1
-        log.info("pass %d: sent %d records", pass_num, sent)
-        if not args.loop:
-            break
-
-    for s in pubs.values():
-        s.close()
+    finally:
+        for s in pubs.values():
+            s.close()
+        ctx.term()
     return 0
 
 

@@ -1,6 +1,6 @@
 # Phase 2 — First flight: multi-step missions and real-drone verification
 
-Phase 1 proved the perception → reasoning → tool dispatch loop on a desk in `--dummy` mode. The orchestrator can take a voice command, fuse it with a YOLO scene + a Gemini-reasoned RGB frame, and dispatch a tool call that the flight bridge would execute against MAVSDK.
+Phase 1 proved the perception → reasoning → tool dispatch loop end-to-end against a desk autopilot. The orchestrator can take a voice command, fuse it with a YOLO scene + a Gemini-reasoned RGB frame, and dispatch a tool call that the flight bridge executes against MAVSDK.
 
 Phase 2 takes the same loop into actual flight in a controlled indoor environment.
 
@@ -26,13 +26,12 @@ The decision lives outside this doc — once you pick, Phase 2B's scope and prer
 
 ## Goals
 
-### 1. Live flight (drop `--dummy`)  — Phase 2A
+### 1. Live flight  — Phase 2A
 
-The flight bridge currently defaults to `--dummy` in `docker-compose.yaml`. Phase 2A flips that to live MAVSDK against the connected PX4 FC.
+The flight bridge talks to the PX4 FC via MAVSDK on every run.
 
-- Add a `docker-compose.live.yaml` overlay that drops `--dummy` and adds `extra_hosts: ["drone.local:<pi-ip>"]` for the bridge.
 - Validate the safety envelope **in flight**: takeoff capped at `safety.max_altitude_m`, geofence rejecting `goto_ned` outside `safety.geofence_radius_m` (Phase 2B only — needs position), velocity rejection on `set_velocity_ned` over `safety.max_velocity_mps` (Phase 2B). The altitude cap and `require_spoken_arm` gates are testable in 2A.
-- Verify `abort` actually disarms a flying drone. Note: today `abort` calls `Action.kill()` (motors instantly off, drone falls). Indoors that's risky — Phase 2A switches the bridge handler to use `Action.land()` for the abort tool, with `Action.kill()` reserved as a separate `kill` tool for true emergencies.
+- Verify `abort` lands a flying drone via `Action.land()` (controlled descent + disarm-on-touchdown), and that the separate `kill` tool reserves `Action.kill()` for true emergencies.
 
 ### 2. Multi-step mission orchestration  — Phase 2A scaffold, 2B exercises
 
@@ -45,7 +44,7 @@ Phase 2 adds an explicit mission state machine:
 - When a tool call returns ok, the orchestrator advances the mission step and re-prompts the VLM with the new state. Loop until VLM emits a terminal call (`hold`, `land`, `abort`) or the user gives a new command.
 - Mission abort (user voice or safety trip) cleanly cancels and returns to idle.
 
-The state machine itself is testable in 2A against `--dummy` and a stub VLM. 2B exercises it under real flight.
+The state machine itself is testable in 2A with a stub VLM and a fake bridge in unit/integration tests. 2B exercises it under real flight.
 
 ### 3. Telemetry-aware reasoning  — Phase 2A
 
@@ -95,6 +94,5 @@ Phase 2 adds an explicit recovery layer:
 
 - `safety.heartbeat_loss_action: rtl` — bridge auto-action on autopilot heartbeat drop. `hold` also valid.
 - `safety.heartbeat_loss_threshold_s: 2.0` — how long to wait before triggering.
-- `orchestrator.bridge_offline_threshold_s: 3.0` — how long without a bridge REQ reply before the orchestrator surfaces offline.
 - `orchestrator.telemetry_history_seconds: 5.0` — telemetry ring-buffer depth in seconds.
 - `orchestrator.mission_max_steps: 10` — hard cap on mission re-prompt loop to bound Gemini calls per mission.

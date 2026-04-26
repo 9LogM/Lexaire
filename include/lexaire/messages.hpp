@@ -40,6 +40,7 @@ inline std::string bind_endpoint(const std::string& ep) {
 struct Telemetry {
     std::int64_t ts_ns = 0;
     bool        connected      = false;
+    bool        qgc_connected  = false;
     bool        armed          = false;
     std::string flight_mode    = "N/A";
     std::optional<int>    battery_pct;
@@ -57,6 +58,7 @@ struct Telemetry {
         json j = {
             {"ts_ns", ts_ns},
             {"connected", connected},
+            {"qgc_connected", qgc_connected},
             {"armed", armed},
             {"flight_mode", flight_mode},
             {"battery_pct", battery_pct ? json(*battery_pct) : json(nullptr)},

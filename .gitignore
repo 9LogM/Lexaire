@@ -40,3 +40,7 @@ REPORT.md
 python/tests/
 python/tools/
 RS-L515-Docker/
+
+# Per-phase scratch logs (assistant working notes, never committed).
+# Public design docs in docs/ stay tracked; only *-prep.md is local-only.
+docs/*-prep.md

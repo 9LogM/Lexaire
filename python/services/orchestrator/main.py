@@ -97,27 +97,26 @@ class Orchestrator:
         self._telem_history_s = float(cfg.get("orchestrator.telemetry_history_seconds", 5.0))
         self._telem_history: collections.deque = collections.deque()
 
+        # One private zmq.Context for every socket this orchestrator owns —
+        # PUB, SUB, PULL, REQ, plus the SensorSubscriber's. Avoids the
+        # process-wide singleton and gives stop() a clean term().
+        self._zmq = zmq.Context()
+
         # Hold onto the latest frame so the VLM sees current pixels.
         self.sub = SensorSubscriber(
+            self._zmq,
             rgb_endpoint=cfg.sensor.channels.rgb,
             depth_endpoint=cfg.sensor.channels.depth,
         )
         self.latest_fs = None
         self.latest_fs_lock = threading.Lock()
 
-        # Sockets
-        # NOTE: command_pull is deferred — it's bound inside _run_command_thread
-        # on a fresh zmq.Context to work around a reception failure when the
-        # socket lives on the shared zmq.Context.instance() singleton.
+        # command_pull is bound inside _run_command_thread.
         self.command_pull = None
-        self.status_pub = transport.pub(cfg.get("services.orchestrator_status_pub",
-                                                 "tcp://127.0.0.1:6102"))
-        self.scene_sub = transport.sub(cfg.get("services.perception_scene_pub",
-                                                "tcp://127.0.0.1:6100"))
-        self.telem_sub = transport.sub(cfg.get("services.telemetry_pub",
-                                                "tcp://127.0.0.1:6101"))
-        self.flight_req_endpoint = cfg.get("services.flight_bridge_rep",
-                                            "tcp://127.0.0.1:6300")
+        self.status_pub = transport.pub(self._zmq, cfg.require("services.orchestrator_status_pub"))
+        self.scene_sub  = transport.sub(self._zmq, cfg.require("services.perception_scene_pub"))
+        self.telem_sub  = transport.sub(self._zmq, cfg.require("services.telemetry_pub"))
+        self.flight_req_endpoint = cfg.require("services.flight_bridge_rep")
 
         self.safety_snapshot = {
             "max_altitude_m":    float(cfg.get("safety.max_altitude_m", 5.0)),
@@ -125,16 +124,14 @@ class Orchestrator:
             "max_velocity_mps":  float(cfg.get("safety.max_velocity_mps", 1.5)),
         }
 
-        # Bridge-offline detection: any successful tool reply updates this
-        # timestamp; if no success within bridge_offline_threshold_s, the
-        # orchestrator surfaces "bridge_offline" on its status PUB and rejects
-        # new tool dispatches until a reply lands. Initialized to "now" so
-        # we don't false-positive on startup before the first tool call.
-        self._bridge_offline_threshold_s = float(
-            cfg.get("orchestrator.bridge_offline_threshold_s", 3.0)
-        )
-        self._last_bridge_ok_ts = time.monotonic()
+        # Set only on REQ timeout, cleared on any reply.
+        self._bridge_offline_flag = False
+        self._last_bridge_ok_ts: Optional[float] = None
         self._bridge_lock = threading.Lock()
+
+        # Lazy REQ socket; recycled on timeout because REQ doesn't tolerate
+        # a missed recv (strict send/recv state machine).
+        self._req_socket: Optional[zmq.Socket] = None
 
     # -- Lifecycle ------------------------------------------------------------
 
@@ -161,32 +158,29 @@ class Orchestrator:
         for s in (self.command_pull, self.status_pub, self.scene_sub, self.telem_sub):
             if s is not None:
                 s.close()
+        self._reset_req_socket()
+        self._zmq.term()
 
     # -- Sockets --------------------------------------------------------------
 
     def _run_command_thread(self):
-        # Bind PULL on a fresh zmq.Context rather than the shared instance().
-        # Observed: PULL sockets created on zmq.Context.instance() in this
-        # process silently drop reception — poll() never fires POLLIN even
-        # though the socket is listening and writes succeed on the wire.
-        _cmd_ep = self.cfg.get("services.orchestrator_command_pull", "tcp://127.0.0.1:6200")
-        from urllib.parse import urlparse as _urlparse
-        _u = _urlparse(_cmd_ep)
-        _bind_ep = f"tcp://*:{_u.port}" if _u.port else _cmd_ep
-        _local_ctx = zmq.Context()
-        _pull = _local_ctx.socket(zmq.PULL)
-        _pull.setsockopt(zmq.RCVHWM, 16)
-        _pull.setsockopt(zmq.LINGER, 0)
-        _pull.bind(_bind_ep)
-        self.command_pull = _pull
+        cmd_ep = self.cfg.require("services.orchestrator_command_pull")
+        from urllib.parse import urlparse
+        u = urlparse(cmd_ep)
+        bind_ep = f"tcp://*:{u.port}" if u.port else cmd_ep
+        pull = self._zmq.socket(zmq.PULL)
+        pull.setsockopt(zmq.RCVHWM, 16)
+        pull.setsockopt(zmq.LINGER, 0)
+        pull.bind(bind_ep)
+        self.command_pull = pull
         poller = zmq.Poller()
-        poller.register(_pull, zmq.POLLIN)
+        poller.register(pull, zmq.POLLIN)
         while not self.stop_event.is_set():
             events = dict(poller.poll(250))
-            if _pull not in events:
+            if pull not in events:
                 continue
             try:
-                frame = _pull.recv()
+                frame = pull.recv()
                 hdr = decode_header(frame)
                 cmd = VoiceCommand(
                     ts_ns=int(hdr.get("ts_ns", now_ns())),
@@ -240,9 +234,8 @@ class Orchestrator:
 
     def _run_frame_thread(self):
         while not self.stop_event.is_set():
-            fs = self.sub.get_nowait()
+            fs = self.sub.get(timeout=0.25)
             if fs is None:
-                time.sleep(0.02)
                 continue
             with self.latest_fs_lock:
                 self.latest_fs = fs
@@ -271,6 +264,7 @@ class Orchestrator:
         max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))
         mission = OrchestratorMission(goal_text=cmd.text, started_ts_ns=now_ns())
         terminal_call: Optional[str] = None
+        stuck = False
 
         # Re-prompt loop: after each tool result we feed the new state back to
         # the VLM so it can react. Bounded by mission_max_steps to cap Gemini
@@ -295,6 +289,7 @@ class Orchestrator:
 
             self._publish_status("executing", decision.thought)
             offline = False
+            stuck = False
             for tc in decision.tool_calls:
                 if self.stop_event.is_set():
                     break
@@ -303,11 +298,27 @@ class Orchestrator:
                 if result.error == "bridge_offline":
                     offline = True
                     break
+                # Bail out if the VLM keeps requesting the same failing tool —
+                # otherwise a stuck preflight (e.g. PX4 'Arming denied') sends
+                # us into an infinite Gemini-call loop until quota or
+                # max_steps. Two identical (tool, error) failures in a row is
+                # enough signal that re-prompting won't change the outcome.
+                if (not result.ok and len(mission.step_history) >= 2):
+                    last = mission.step_history[-1]
+                    prev = mission.step_history[-2]
+                    if (last["tool"] == prev["tool"]
+                            and last["error"] == prev["error"]
+                            and last["error"] is not None):
+                        self.log.warning(
+                            "mission stuck: %s keeps failing with %r; bailing",
+                            last["tool"], last["error"])
+                        stuck = True
+                        break
                 if tc.name in _TERMINAL_TOOLS:
                     terminal_call = tc.name
                     break
 
-            if terminal_call is not None or offline:
+            if terminal_call is not None or offline or stuck:
                 break
 
         if terminal_call:
@@ -316,6 +327,8 @@ class Orchestrator:
             end_reason = "bridge_offline"
         elif mission.current_step >= max_steps:
             end_reason = f"max_steps={max_steps}"
+        elif stuck:
+            end_reason = "stuck_on_repeated_failure"
         else:
             end_reason = "no_tool_calls"
         self.history.append(
@@ -351,36 +364,47 @@ class Orchestrator:
         )
 
     def _bridge_offline(self) -> bool:
-        """True if no successful tool reply within the offline threshold."""
+        """True only after a dispatch has actually timed out and no later
+        reply has reset the flag."""
         with self._bridge_lock:
-            return (time.monotonic() - self._last_bridge_ok_ts) > self._bridge_offline_threshold_s
+            return self._bridge_offline_flag
+
+    def _ensure_req_socket(self) -> zmq.Socket:
+        if self._req_socket is None:
+            s = self._zmq.socket(zmq.REQ)
+            s.setsockopt(zmq.LINGER, 0)
+            s.setsockopt(zmq.RCVTIMEO, 3000)
+            s.setsockopt(zmq.SNDTIMEO, 3000)
+            s.connect(self.flight_req_endpoint)
+            self._req_socket = s
+        return self._req_socket
+
+    def _reset_req_socket(self) -> None:
+        if self._req_socket is not None:
+            try:
+                self._req_socket.close(linger=0)
+            except zmq.ZMQError as e:
+                self.log.warning("REQ close failed: %s", e)
+            self._req_socket = None
 
     def _dispatch_tool_call(self, tc: ToolCall) -> ToolResult:
-        # Refuse to dispatch if the bridge has been silent past threshold —
-        # the next round-trip would just hang for the REQ timeout. Caller
-        # gets an immediate failure; the watchdog status PUB tells the user.
+        # Once the offline flag is set, fail the call immediately rather
+        # than wait out another REQ timeout. The flag clears on the first
+        # successful reply, so the next dispatch after recovery goes through.
         if self._bridge_offline():
             self.log.warning("tool %s rejected: bridge_offline", tc.name)
             self._publish_status("bridge_offline",
-                                  f"refusing {tc.name}: no bridge reply in "
-                                  f"{self._bridge_offline_threshold_s:.1f}s")
+                                  f"refusing {tc.name}: prior dispatch timed out")
             return ToolResult(request_id=tc.request_id, ok=False, error="bridge_offline")
 
-        # Fresh zmq.Context per call — same workaround as the PULL in
-        # _run_command_thread: zmq.Context.instance() silently drops traffic
-        # on some sockets in this process.
-        _ctx_local = zmq.Context()
-        req = _ctx_local.socket(zmq.REQ)
-        req.setsockopt(zmq.LINGER, 0)
-        req.setsockopt(zmq.RCVTIMEO, 3000)
-        req.setsockopt(zmq.SNDTIMEO, 3000)
-        req.connect(self.flight_req_endpoint)
         # Every arm dispatched by the orchestrator is by definition the result
         # of a spoken voice command — the bridge's safety gate flips on this
         # flag to prove the arm was pilot-initiated, not LLM-hallucinated.
         args = dict(tc.args) if tc.args else {}
         if tc.name == "arm":
             args["voice_confirmed"] = True
+
+        req = self._ensure_req_socket()
         try:
             req.send(json.dumps({
                 "request_id": tc.request_id,
@@ -397,9 +421,10 @@ class Orchestrator:
             )
             # Any reply (ok or not, including safety_denied) means the bridge
             # is alive — reset the offline watchdog. Only timeouts leave it
-            # un-bumped.
+            # set.
             with self._bridge_lock:
                 self._last_bridge_ok_ts = time.monotonic()
+                self._bridge_offline_flag = False
             if not result.ok:
                 self.log.warning("tool %s failed: %s", tc.name, result.error)
             else:
@@ -407,10 +432,10 @@ class Orchestrator:
             return result
         except zmq.error.Again:
             self.log.warning("tool %s timed out", tc.name)
+            self._reset_req_socket()
+            with self._bridge_lock:
+                self._bridge_offline_flag = True
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
-        finally:
-            req.close()
-            _ctx_local.term()
 
     def _publish_status(self, state: str, note: str):
         msg = OrchestratorStatus(
@@ -421,8 +446,11 @@ class Orchestrator:
         )
         try:
             self.status_pub.send(encode_header(msg))
-        except Exception:
-            pass
+        except zmq.ZMQError as e:
+            # Status PUB is non-load-bearing for control flow, but a send
+            # failure here means the TUI has stopped seeing us — surface it
+            # rather than swallow it.
+            self.log.warning("status_pub send failed (%s): %r", e, msg)
 
 
 def cli() -> int:

@@ -46,6 +46,14 @@ class _AttrDict(dict):
                 return default
         return cur
 
+    def require(self, path: str) -> Any:
+        """Dotted-path lookup that raises if the key is missing or null."""
+        sentinel = object()
+        v = self.get(path, sentinel)
+        if v is sentinel or v is None:
+            raise KeyError(f"required config key missing: {path!r}")
+        return v
+
 
 def _wrap(obj: Any) -> Any:
     if isinstance(obj, dict):
