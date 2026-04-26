@@ -128,15 +128,9 @@ static int run() {
         return 3;
     }
 
-    // Polls MAVSDK connection state at 5 Hz. After hb_threshold_s of
-    // disconnection while `armed_with_voice` is true, fires RTL (or HOLD).
-    // One-shot per disconnect — re-arms when the link returns. Skipped if
-    // no autopilot ever connected (nothing to recover).
-    //
-    // Why armed_with_voice as the gate: once the link drops we can't read
-    // armed/in-air via MAVSDK, so we use the locally-tracked spoken-arm
-    // state — it's set on a voice-confirmed arm and cleared on disarm,
-    // which approximates "an active armed session was in progress".
+    // armed_with_voice is the gate because we can't read armed/in-air via
+    // MAVSDK once the link drops; the locally-tracked flag approximates
+    // "an active armed session was in progress".
     std::thread heartbeat_thread([&]() {
         if (!ctx.system || !ctx.action || !ctx.telemetry) return;
         using namespace std::chrono_literals;

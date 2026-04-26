@@ -130,12 +130,13 @@ else
     # L515 publisher ports: 5555 RGB, 5556 depth, 5557 IMU. If the publisher
     # isn't running on the Pi, perception will SUB silently and never see a
     # frame. Use bash /dev/tcp; portable to slim images without nc.
+    L515_HINT="see https://github.com/9LogM/RS-L515-Docker for the publisher"
     for port in 5555 5556 5557; do
         if (exec 3<>"/dev/tcp/$HOST/$port") 2>/dev/null; then
             exec 3<&-; exec 3>&-
             ok "L515 publisher port $port open on $HOST"
         else
-            warn "L515 publisher port $port not reachable on $HOST (start RS-L515-Docker on the Pi)"
+            warn "L515 publisher port $port not reachable on $HOST ($L515_HINT)"
         fi
     done
 fi

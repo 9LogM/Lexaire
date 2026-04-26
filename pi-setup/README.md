@@ -1,6 +1,6 @@
 # pi-setup
 
-One-time infrastructure setup for a drone Pi, separate from the containerized services in `RS-L515-Docker/`.
+One-time infrastructure setup for a drone Pi, separate from the containerized L515 publisher (lives in [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker)).
 
 ## `setup-ap.sh`
 

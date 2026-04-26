@@ -19,17 +19,12 @@
 
 enum class State { MainMenu, SubMenu, Monitoring, Services };
 
-// State of an auxiliary component (relay, GCS stack) inspected via docker.
-// Unknown is distinct from Down — it means the daemon was unreachable, so we
-// can't claim either state. Deploying is set imperatively while a startup
-// command is in flight so the user sees progress instead of a stale "Down".
+// Unknown = docker daemon unreachable (distinct from Down).
+// Deploying is set during in-flight startup commands.
 enum class ServiceState { Unknown, Down, Deploying, Up };
 
-// Where the TUI's spawned-process stderr is captured. Inheriting stderr from
-// ncurses paints child errors directly onto the rendered screen; redirecting
-// to /dev/null hides them entirely. This file preserves them — visible to
-// the user via `docker compose exec lexaire cat /tmp/lexaire-tui.log` or the
-// host shell once the run --rm volume is gone (the log is in-container only).
+// Spawned-process stderr goes here; inheriting it would paint over ncurses,
+// /dev/null would hide failures.
 constexpr const char* TUI_LOG_PATH = "/tmp/lexaire-tui.log";
 
 struct AppContext {
@@ -511,17 +506,8 @@ static void start_input_poll(AppContext& ctx) {
 
 // ── Relay status (one-shot on startup) ───────────────────────────────────────
 
-// Tri-state shell idiom for the docker checks below.
-//
-// `docker ps -q --filter ...` exits 0 whether or not it found anything, so a
-// 0 exit only tells us the daemon was reachable. We must inspect output to
-// distinguish Up from Down. The shell snippet returns:
-//   0 → matched container(s) → Up
-//   1 → daemon ok but no match → Down
-//   2 → daemon unreachable / docker error → Unknown
-//
-// Stderr is appended to TUI_LOG_PATH so a real failure (e.g. socket missing)
-// is preserved for the user to inspect, not silently swallowed.
+// `docker ps -q` exits 0 with empty stdout when no match, so we have to
+// inspect output. Maps to: 0 = Up, 1 = Down, 2 = daemon unreachable.
 static std::string ps_query_shell(const std::string& env_prefix,
                                    const std::string& filter_args) {
     return env_prefix +
@@ -539,10 +525,6 @@ static ServiceState exit_to_state(int exit_code) {
     return ServiceState::Unknown;
 }
 
-// Bring the MAVLink relay up on the Pi if it's not already running. Two
-// async stages: a docker-over-SSH check, then (only if needed) the deploy
-// command. The header indicator transitions through Unknown → Deploying
-// → Up (or Unknown on failure), giving the user live progress.
 static void ensure_relay_running(AppContext& ctx) {
     std::string check_cmd = ps_query_shell(
         "DOCKER_HOST=ssh://" + ctx.drone_host,

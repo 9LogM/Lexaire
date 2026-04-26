@@ -8,10 +8,21 @@ drone:
   mavsdk_udp:    udpout://drone.local:14551
 
 sensor:
+  # Pointer to the sensor publisher project — any docker-based ZMQ
+  # publisher works; Lexaire just subscribes to the channels below.
+  # Default: Intel RealSense L515 (RGB + depth + IMU + IR + confidence).
+  publisher_repo: https://github.com/9LogM/RS-L515-Docker
+
+  # ZMQ endpoint per stream. Leave a value blank to disable that channel
+  # — replay skips disabled streams; services that need a stream
+  # (perception requires rgb+depth) will fail at startup with a clear
+  # error if it's blank.
   channels:
-    rgb:   tcp://drone.local:5555
-    depth: tcp://drone.local:5556
-    imu:   tcp://drone.local:5557
+    rgb:        tcp://drone.local:5555    # color, JPEG-encoded
+    depth:      tcp://drone.local:5556    # z16, zstd-compressed
+    imu:        tcp://drone.local:5557    # accel + gyro samples
+    infrared:   tcp://drone.local:5558    # y8, zstd-compressed
+    confidence: tcp://drone.local:5559    # raw8 confidence map (L515-specific)
 
 perception:
   tick_hz: 2

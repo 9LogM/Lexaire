@@ -43,8 +43,8 @@ def cli() -> int:
     ctx = zmq.Context()
     sub = SensorSubscriber(
         ctx,
-        rgb_endpoint=cfg.sensor.channels.rgb,
-        depth_endpoint=cfg.sensor.channels.depth,
+        rgb_endpoint=cfg.require("sensor.channels.rgb"),
+        depth_endpoint=cfg.require("sensor.channels.depth"),
     )
     pub = transport.pub(ctx, scene_pub_ep)
 

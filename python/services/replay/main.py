@@ -61,12 +61,18 @@ def _sleep_monotonic(target_ns: int, stop: threading.Event) -> None:
 # -- Record -------------------------------------------------------------------
 
 
+def _enabled_channels(cfg) -> dict[str, str]:
+    """Return {name: endpoint} for every sensor channel with a non-empty
+    endpoint. Channels left blank/null in config are skipped."""
+    raw = cfg.get("sensor.channels") or {}
+    return {name: ep for name, ep in raw.items() if ep}
+
+
 def _run_record(cfg, args, log, stop: threading.Event) -> int:
-    channels = {
-        "rgb":   cfg.require("sensor.channels.rgb"),
-        "depth": cfg.require("sensor.channels.depth"),
-        "imu":   cfg.require("sensor.channels.imu"),
-    }
+    channels = _enabled_channels(cfg)
+    if not channels:
+        log.error("no sensor channels enabled in config")
+        return 2
     ctx = zmq.Context()
     subs = {name: transport.sub(ctx, ep) for name, ep in channels.items()}
     poller = zmq.Poller()
@@ -114,10 +120,12 @@ def _run_record(cfg, args, log, stop: threading.Event) -> int:
 
 def _run_play(cfg, args, log, stop: threading.Event) -> int:
     endpoints = {
-        "rgb":   _rewrite_host(cfg.require("sensor.channels.rgb"),   args.bind_host),
-        "depth": _rewrite_host(cfg.require("sensor.channels.depth"), args.bind_host),
-        "imu":   _rewrite_host(cfg.require("sensor.channels.imu"),   args.bind_host),
+        name: _rewrite_host(ep, args.bind_host)
+        for name, ep in _enabled_channels(cfg).items()
     }
+    if not endpoints:
+        log.error("no sensor channels enabled in config")
+        return 2
     ctx = zmq.Context()
     pubs = {name: transport.pub(ctx, ep) for name, ep in endpoints.items()}
     log.info("replay bound %s", endpoints)

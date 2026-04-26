@@ -26,7 +26,8 @@ Natural Language Control and Autonomy for Drone Systems.
 
 ### Configuration
 
-Edit `common/config.yaml`:
+Project-shared defaults live in `common/config.yaml` — edit `drone.host`, `drone.serial_device`, and `drone.serial_baud` to match your hardware:
+
 ```yaml
 drone:
   host:          user@companion.local   # SSH target for the companion computer
@@ -34,36 +35,37 @@ drone:
   serial_baud:   57600                  # baud rate of the FC link
 ```
 
+Per-machine values (secrets and the Pi's IP) live in `.env`. Copy the example and fill in:
+
+```bash
+cp .env.example .env
+# Edit .env: set GEMINI_API_KEY and DRONE_PI_IP
+```
+
+### Pi setup
+
+The MAVLink relay and the L515 publisher both run on the Pi.
+
+- **MAVLink relay** lives in this repo (`relay/`). Lexaire deploys it automatically the first time the TUI starts. After that, `restart: unless-stopped` keeps it up across reboots.
+- **L515 publisher** is a separate repo: [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker). Clone it on the Pi and `docker compose up -d`. Independent of this repo's release cadence.
+
 ### SSH key setup
 
 Lexaire deploys the relay over SSH. Run once from the ground station:
 
 ```bash
-ssh-keygen -t ed25519 -C "lexaire"   # skip if you already have a key
-ssh-copy-id user@companion.local   # use the drone.host value from config.yaml
+ssh-keygen -t ed25519 -C "lexaire"      # skip if you already have a key
+ssh-copy-id user@companion.local        # use drone.host from config.yaml
 ```
 
-### Build
+### Build and run
 
 ```bash
 docker compose build
-```
-
-### Run
-
-```bash
 docker compose run --rm lexaire
 ```
 
-### Deploy relay
-
-On first run, deploy the MAVLink relay to the companion computer from the Lexaire menu:
-
-```
-1. Start relay
-```
-
-This uses Docker's remote daemon over SSH. After the first deploy, the relay auto-starts on every reboot.
+The TUI brings up the GCS stack via `depends_on` and auto-deploys the relay to the Pi if it's not already running.
 
 ---
 
@@ -150,7 +152,7 @@ The L515 publisher itself lives in a separate repo, [`RS-L515-Docker`](https://g
 
 Everything lives in [`common/config.yaml`](common/config.yaml). Key fields:
 
-- `sensor.channels.{rgb,depth,imu}` — endpoints the perception/orchestrator subscribe to. Defaults assume the L515 publisher at `tcp://drone.local:<port>`. For live-Pi runs from compose, add a `docker-compose.override.yaml` mapping `extra_hosts: ["drone.local:<pi-ip>"]` on `perception` and `orchestrator`.
+- `sensor.channels.{rgb,depth,imu}` — endpoints the perception/orchestrator subscribe to. Defaults assume the L515 publisher at `tcp://drone.local:<port>`. The Pi's IP comes from `DRONE_PI_IP` in `.env`; compose substitutes it into `extra_hosts` for every service that needs to resolve `drone.local`.
 - `perception.vlm.{provider,model,api_key_env,temperature}` — currently `gemini` with `gemini-2.5-flash`. Requires `GEMINI_API_KEY` in `.env`.
 - `perception.detector.{model,weights,score_threshold,...}` — YOLO11; `yolo11n.pt` is auto-downloaded on first run.
 - `safety.{max_altitude_m,geofence_radius_m,max_velocity_mps,require_spoken_arm}` — non-overridable bridge-side gate.

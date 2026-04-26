@@ -105,8 +105,8 @@ class Orchestrator:
         # Hold onto the latest frame so the VLM sees current pixels.
         self.sub = SensorSubscriber(
             self._zmq,
-            rgb_endpoint=cfg.sensor.channels.rgb,
-            depth_endpoint=cfg.sensor.channels.depth,
+            rgb_endpoint=cfg.require("sensor.channels.rgb"),
+            depth_endpoint=cfg.require("sensor.channels.depth"),
         )
         self.latest_fs = None
         self.latest_fs_lock = threading.Lock()
@@ -126,7 +126,6 @@ class Orchestrator:
 
         # Set only on REQ timeout, cleared on any reply.
         self._bridge_offline_flag = False
-        self._last_bridge_ok_ts: Optional[float] = None
         self._bridge_lock = threading.Lock()
 
         # Lazy REQ socket; recycled on timeout because REQ doesn't tolerate
@@ -266,11 +265,8 @@ class Orchestrator:
         terminal_call: Optional[str] = None
         stuck = False
 
-        # Re-prompt loop: after each tool result we feed the new state back to
-        # the VLM so it can react. Bounded by mission_max_steps to cap Gemini
-        # API calls per mission. Preempted by a fresh voice command in the
-        # queue (the next iteration of run() will pick it up) or by
-        # orchestrator shutdown.
+        # Re-prompt the VLM with each tool result; bounded by max_steps and
+        # preempted by a fresh voice command (next run() iteration picks it up).
         while mission.current_step < max_steps and not self.stop_event.is_set():
             if not self.command_q.empty():
                 self.log.info("mission preempted by new voice command")
@@ -298,11 +294,9 @@ class Orchestrator:
                 if result.error == "bridge_offline":
                     offline = True
                     break
-                # Bail out if the VLM keeps requesting the same failing tool —
-                # otherwise a stuck preflight (e.g. PX4 'Arming denied') sends
-                # us into an infinite Gemini-call loop until quota or
-                # max_steps. Two identical (tool, error) failures in a row is
-                # enough signal that re-prompting won't change the outcome.
+                # Bail on two consecutive identical (tool, error) failures —
+                # without this, a stuck preflight (e.g. PX4 'Arming denied')
+                # burns Gemini calls until max_steps.
                 if (not result.ok and len(mission.step_history) >= 2):
                     last = mission.step_history[-1]
                     prev = mission.step_history[-2]
@@ -419,11 +413,9 @@ class Orchestrator:
                 error=data.get("error"),
                 data=data.get("data"),
             )
-            # Any reply (ok or not, including safety_denied) means the bridge
-            # is alive — reset the offline watchdog. Only timeouts leave it
-            # set.
+            # Any reply (ok or error) means the bridge is alive; only
+            # timeouts leave _bridge_offline_flag set.
             with self._bridge_lock:
-                self._last_bridge_ok_ts = time.monotonic()
                 self._bridge_offline_flag = False
             if not result.ok:
                 self.log.warning("tool %s failed: %s", tc.name, result.error)

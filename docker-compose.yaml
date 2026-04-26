@@ -26,14 +26,16 @@ services:
       # full docker control over the host. Acceptable for an operator tool.
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # Every container that needs to reach the Pi maps drone.local -> the IP
+  # in DRONE_PI_IP from .env. Compose substitutes at parse time; if the
+  # var is unset, ${DRONE_PI_IP:?...} stops compose with a clear message.
   flight-bridge:
     image: lexaire-cpp:latest
     container_name: lexaire-flight-bridge
     entrypoint: []
     command: ["/workspace/build/lexaire-flight-bridge"]
-    # docker-compose.override.yaml supplies the extra_hosts that map
-    # drone.local to the Pi's IP — every operator's network is different,
-    # so it stays out of the committed file.
+    extra_hosts:
+      - "drone.local:${DRONE_PI_IP:?DRONE_PI_IP must be set in .env}"
     volumes:
       - ./common:/workspace/common:ro
 
@@ -46,6 +48,8 @@ services:
     env_file:
       - path: .env
         required: false
+    extra_hosts:
+      - "drone.local:${DRONE_PI_IP:?DRONE_PI_IP must be set in .env}"
     command: ["lexaire-perception"]
     volumes:
       - ./common:/workspace/common:ro
@@ -58,6 +62,8 @@ services:
     env_file:
       - path: .env
         required: false
+    extra_hosts:
+      - "drone.local:${DRONE_PI_IP:?DRONE_PI_IP must be set in .env}"
     command: ["lexaire-orchestrator"]
     volumes:
       - ./common:/workspace/common:ro
