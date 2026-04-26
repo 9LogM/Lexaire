@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import json
 import queue
 import signal
 import sys
 import threading
 import time
+from typing import Optional
 
 import zmq
 
@@ -37,6 +39,33 @@ from lexaire.messages import (
 from lexaire.subscriber import SensorSubscriber
 
 from .vlm_base import VLM, VlmContext
+
+
+# Tool calls that end a mission cleanly. After any of these the orchestrator
+# stops re-prompting the VLM and returns to idle.
+_TERMINAL_TOOLS = frozenset({"hold", "land", "abort", "return_to_launch", "kill", "disarm"})
+
+
+@dataclasses.dataclass
+class OrchestratorMission:
+    """Active multi-step mission state. Surfaced to the VLM via VlmContext."""
+    goal_text: str
+    started_ts_ns: int
+    current_step: int = 0
+    step_history: list[dict] = dataclasses.field(default_factory=list)
+
+    def record(self, tool_name: str, args: dict, result: ToolResult) -> None:
+        self.step_history.append({
+            "tool": tool_name,
+            "args": args,
+            "ok": result.ok,
+            "error": result.error,
+            "ts_ns": now_ns(),
+        })
+        self.current_step += 1
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
 
 
 def _build_vlm(cfg) -> VLM:
@@ -228,23 +257,60 @@ class Orchestrator:
             ))
             return
 
-        ctx = self._build_context(cmd)
-        self._publish_status("thinking", f"reasoning about: {cmd.text!r}")
-        decision = self.vlm.decide(ctx)
-        self.log.info("decision: %s -> %d tool_calls", decision.thought, len(decision.tool_calls))
+        max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))
+        mission = OrchestratorMission(goal_text=cmd.text, started_ts_ns=now_ns())
+        terminal_call: Optional[str] = None
 
-        self._publish_status("executing", decision.thought)
-        for tc in decision.tool_calls:
-            self._dispatch_tool_call(tc)
+        # Re-prompt loop: after each tool result we feed the new state back to
+        # the VLM so it can react. Bounded by mission_max_steps to cap Gemini
+        # API calls per mission. Preempted by a fresh voice command in the
+        # queue (the next iteration of run() will pick it up) or by
+        # orchestrator shutdown.
+        while mission.current_step < max_steps and not self.stop_event.is_set():
+            if not self.command_q.empty():
+                self.log.info("mission preempted by new voice command")
+                break
 
-        self.history.append(f"user: {cmd.text} | thought: {decision.thought} | calls: "
-                            f"{[tc.name for tc in decision.tool_calls]}")
-        # keep history bounded
+            ctx = self._build_context(cmd, mission=mission)
+            step_label = f"step {mission.current_step + 1}/{max_steps}"
+            self._publish_status("thinking", f"{step_label}: {cmd.text!r}")
+            decision = self.vlm.decide(ctx)
+            self.log.info("%s decision: %s -> %d tool_calls",
+                          step_label, decision.thought, len(decision.tool_calls))
+
+            if not decision.tool_calls:
+                # VLM had nothing to say — treat as natural end of mission.
+                break
+
+            self._publish_status("executing", decision.thought)
+            for tc in decision.tool_calls:
+                if self.stop_event.is_set():
+                    break
+                result = self._dispatch_tool_call(tc)
+                mission.record(tc.name, dict(tc.args or {}), result)
+                if tc.name in _TERMINAL_TOOLS:
+                    terminal_call = tc.name
+                    break
+
+            if terminal_call is not None:
+                break
+
+        end_reason = (
+            f"terminal:{terminal_call}" if terminal_call
+            else f"max_steps={max_steps}" if mission.current_step >= max_steps
+            else "no_tool_calls"
+        )
+        self.history.append(
+            f"user: {cmd.text} | steps: {mission.current_step} | end: {end_reason}"
+        )
         self.history[:] = self.history[-20:]
+        self._publish_status("idle", f"mission done ({end_reason})")
 
-        self._publish_status("idle", "waiting")
-
-    def _build_context(self, cmd: VoiceCommand) -> VlmContext:
+    def _build_context(
+        self,
+        cmd: VoiceCommand,
+        mission: Optional[OrchestratorMission] = None,
+    ) -> VlmContext:
         with self.latest_scene_lock:
             scene = dict(self.latest_scene)
         with self.latest_telem_lock:
@@ -260,6 +326,7 @@ class Orchestrator:
             history=list(self.history),
             safety=dict(self.safety_snapshot),
             telemetry_history=telem_hist,
+            mission=mission.to_dict() if mission is not None else None,
         )
 
     def _dispatch_tool_call(self, tc: ToolCall) -> ToolResult:
