@@ -125,6 +125,17 @@ class Orchestrator:
             "max_velocity_mps":  float(cfg.get("safety.max_velocity_mps", 1.5)),
         }
 
+        # Bridge-offline detection: any successful tool reply updates this
+        # timestamp; if no success within bridge_offline_threshold_s, the
+        # orchestrator surfaces "bridge_offline" on its status PUB and rejects
+        # new tool dispatches until a reply lands. Initialized to "now" so
+        # we don't false-positive on startup before the first tool call.
+        self._bridge_offline_threshold_s = float(
+            cfg.get("orchestrator.bridge_offline_threshold_s", 3.0)
+        )
+        self._last_bridge_ok_ts = time.monotonic()
+        self._bridge_lock = threading.Lock()
+
     # -- Lifecycle ------------------------------------------------------------
 
     def start(self):
@@ -283,28 +294,38 @@ class Orchestrator:
                 break
 
             self._publish_status("executing", decision.thought)
+            offline = False
             for tc in decision.tool_calls:
                 if self.stop_event.is_set():
                     break
                 result = self._dispatch_tool_call(tc)
                 mission.record(tc.name, dict(tc.args or {}), result)
+                if result.error == "bridge_offline":
+                    offline = True
+                    break
                 if tc.name in _TERMINAL_TOOLS:
                     terminal_call = tc.name
                     break
 
-            if terminal_call is not None:
+            if terminal_call is not None or offline:
                 break
 
-        end_reason = (
-            f"terminal:{terminal_call}" if terminal_call
-            else f"max_steps={max_steps}" if mission.current_step >= max_steps
-            else "no_tool_calls"
-        )
+        if terminal_call:
+            end_reason = f"terminal:{terminal_call}"
+        elif self._bridge_offline():
+            end_reason = "bridge_offline"
+        elif mission.current_step >= max_steps:
+            end_reason = f"max_steps={max_steps}"
+        else:
+            end_reason = "no_tool_calls"
         self.history.append(
             f"user: {cmd.text} | steps: {mission.current_step} | end: {end_reason}"
         )
         self.history[:] = self.history[-20:]
-        self._publish_status("idle", f"mission done ({end_reason})")
+        # Bridge-offline already published its own status during dispatch;
+        # let it stick for the TUI rather than overwriting with "idle".
+        if end_reason != "bridge_offline":
+            self._publish_status("idle", f"mission done ({end_reason})")
 
     def _build_context(
         self,
@@ -329,7 +350,22 @@ class Orchestrator:
             mission=mission.to_dict() if mission is not None else None,
         )
 
+    def _bridge_offline(self) -> bool:
+        """True if no successful tool reply within the offline threshold."""
+        with self._bridge_lock:
+            return (time.monotonic() - self._last_bridge_ok_ts) > self._bridge_offline_threshold_s
+
     def _dispatch_tool_call(self, tc: ToolCall) -> ToolResult:
+        # Refuse to dispatch if the bridge has been silent past threshold —
+        # the next round-trip would just hang for the REQ timeout. Caller
+        # gets an immediate failure; the watchdog status PUB tells the user.
+        if self._bridge_offline():
+            self.log.warning("tool %s rejected: bridge_offline", tc.name)
+            self._publish_status("bridge_offline",
+                                  f"refusing {tc.name}: no bridge reply in "
+                                  f"{self._bridge_offline_threshold_s:.1f}s")
+            return ToolResult(request_id=tc.request_id, ok=False, error="bridge_offline")
+
         # Fresh zmq.Context per call — same workaround as the PULL in
         # _run_command_thread: zmq.Context.instance() silently drops traffic
         # on some sockets in this process.
@@ -359,6 +395,11 @@ class Orchestrator:
                 error=data.get("error"),
                 data=data.get("data"),
             )
+            # Any reply (ok or not, including safety_denied) means the bridge
+            # is alive — reset the offline watchdog. Only timeouts leave it
+            # un-bumped.
+            with self._bridge_lock:
+                self._last_bridge_ok_ts = time.monotonic()
             if not result.ok:
                 self.log.warning("tool %s failed: %s", tc.name, result.error)
             else:
