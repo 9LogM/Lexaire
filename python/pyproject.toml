@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lexaire"
+version = "0.1.0"
+description = "Lexaire ground-station Python services — perception, orchestration, STT, replay"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=26",
+    "numpy>=1.26",
+    "zstandard>=0.22",
+    "pillow>=10",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+gemini = [
+    "google-genai>=1.0",
+]
+perception = [
+    "opencv-python-headless>=4.10",
+]
+detector-yolo = [
+    "ultralytics>=8.3",
+]
+stt-whisper = [
+    "faster-whisper>=1.0",
+]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2",
+]
+
+[project.scripts]
+lexaire-perception   = "services.perception.main:cli"
+lexaire-orchestrator = "services.orchestrator.main:cli"
+lexaire-stt          = "services.stt.main:cli"
+lexaire-replay       = "services.replay.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lexaire*", "services*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

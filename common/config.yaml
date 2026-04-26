@@ -1,3 +1,53 @@
-serial_device: /dev/ttyACM0
-serial_baud: 57600
-drone_host: orbis@drone.local
+# Lexaire configuration.
+# Secrets live in the gitignored .env and are referenced by `<field>_env` keys.
+
+drone:
+  host:          orbis@drone.local
+  serial_device: /dev/ttyACM0
+  serial_baud:   57600
+  mavsdk_udp:    udpout://drone.local:14551
+
+sensor:
+  channels:
+    rgb:   tcp://drone.local:5555
+    depth: tcp://drone.local:5556
+    imu:   tcp://drone.local:5557
+
+perception:
+  tick_hz: 2
+  vlm:
+    provider:    gemini              # gemini
+    model:       gemini-2.5-flash
+    api_key_env: GEMINI_API_KEY
+    temperature: 0.2
+  detector:
+    model:           yolo            # yolo
+    weights:         yolo11n.pt      # n|s|m|l|x size vs. speed
+    score_threshold: 0.35
+    max_detections:  20
+    device:          auto            # auto | cpu | cuda:0
+    classes:         null            # null = all COCO classes, else a list
+
+stt:
+  abort_keyword:        abort
+  whisper_model:        small        # tiny | base | small | medium | large-v3
+  whisper_device:       auto         # auto | cpu | cuda
+  whisper_compute_type: null         # null = auto; int8 for cpu, float16 for cuda
+  whisper_language:     null         # null = auto-detect, else ISO 639-1 code
+
+safety:
+  max_altitude_m:     5.0
+  geofence_radius_m:  10.0
+  max_velocity_mps:   1.5
+  require_spoken_arm: true
+
+services:
+  # Endpoints bound by the named service; everyone else connects.
+  perception_scene_pub:      tcp://perception:6100
+  telemetry_pub:             tcp://flight-bridge:6101
+  orchestrator_status_pub:   tcp://orchestrator:6102
+  orchestrator_command_pull: tcp://orchestrator:6200
+  flight_bridge_rep:         tcp://flight-bridge:6300
+
+logging:
+  level: INFO

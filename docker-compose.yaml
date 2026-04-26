@@ -1,8 +1,62 @@
 services:
   lexaire:
     build: .
+    image: lexaire-cpp:latest
     container_name: lexaire
-    network_mode: host
     volumes:
       - ./common:/workspace/common:ro
       - ~/.ssh:/mnt/ssh:ro
+
+  flight-bridge:
+    image: lexaire-cpp:latest
+    depends_on:
+      - lexaire
+    container_name: lexaire-flight-bridge
+    entrypoint: []
+    # --dummy is the default; override command (and add extra_hosts for
+    # drone.local) in docker-compose.override.yaml for live-hardware runs.
+    command: ["/workspace/build/lexaire-flight-bridge", "--dummy"]
+    volumes:
+      - ./common:/workspace/common:ro
+
+  perception:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: lexaire-python:latest
+    container_name: lexaire-perception
+    env_file: [.env]
+    command: ["lexaire-perception"]
+    volumes:
+      - ./common:/workspace/common:ro
+
+  orchestrator:
+    image: lexaire-python:latest
+    depends_on:
+      - perception
+    container_name: lexaire-orchestrator
+    env_file: [.env]
+    command: ["lexaire-orchestrator"]
+    volumes:
+      - ./common:/workspace/common:ro
+
+  # STT reads stdin; invoke via `docker compose --profile tools run --rm stt`.
+  stt:
+    image: lexaire-python:latest
+    profiles: ["tools"]
+    stdin_open: true
+    tty: true
+    env_file: [.env]
+    entrypoint: ["lexaire-stt"]
+    volumes:
+      - ./common:/workspace/common:ro
+
+  # Record/playback of sensor streams (field-debug tool, opt-in via profile).
+  replay:
+    image: lexaire-python:latest
+    profiles: ["tools"]
+    env_file: [.env]
+    entrypoint: ["lexaire-replay"]
+    volumes:
+      - ./common:/workspace/common:ro
+      - ./recordings:/rec
