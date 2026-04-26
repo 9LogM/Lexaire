@@ -131,12 +131,13 @@ else
     # isn't running on the Pi, perception will SUB silently and never see a
     # frame. Use bash /dev/tcp; portable to slim images without nc.
     L515_HINT="see https://github.com/9LogM/RS-L515-Docker for the publisher"
-    for port in 5555 5556 5557; do
+    # 5555 rgb, 5556 depth, 5557 imu, 5558 infrared, 5559 confidence.
+    for port in 5555 5556 5557 5558 5559; do
         if (exec 3<>"/dev/tcp/$HOST/$port") 2>/dev/null; then
             exec 3<&-; exec 3>&-
-            ok "L515 publisher port $port open on $HOST"
+            ok "sensor publisher port $port open on $HOST"
         else
-            warn "L515 publisher port $port not reachable on $HOST ($L515_HINT)"
+            warn "sensor publisher port $port not reachable on $HOST ($L515_HINT)"
         fi
     done
 fi

@@ -25,12 +25,17 @@ RUN echo "StrictHostKeyChecking accept-new" >> /etc/ssh/ssh_config
 
 WORKDIR /workspace
 
-COPY . .
-
+# Copy build inputs first so changes to README/python/scripts don't invalidate
+# the C++ build cache.
+COPY CMakeLists.txt ./
+COPY include ./include
+COPY src ./src
 RUN mkdir build && cd build && \
     cmake .. && \
     make -j"$(nproc)"
 
+# Everything else (compose files, scripts, docs, python). Cheap to recopy.
+COPY . .
 RUN chmod +x /workspace/docker-entrypoint.sh
 
 ENTRYPOINT ["/workspace/docker-entrypoint.sh"]

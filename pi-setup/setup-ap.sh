@@ -22,8 +22,10 @@
 
 set -euo pipefail
 
+DEFAULT_PASSWORD="lexaire-drone"
+
 SSID="${SSID:-drone-ap}"
-PASSWORD="${PASSWORD:-lexaire-drone}"
+PASSWORD="${PASSWORD:-$DEFAULT_PASSWORD}"
 CON_NAME="${CON_NAME:-drone-ap}"
 CHANNEL="${CHANNEL:-6}"
 IFACE="${IFACE:-wlan0}"
@@ -31,6 +33,13 @@ IFACE="${IFACE:-wlan0}"
 if [[ $EUID -ne 0 ]]; then
     echo "Must run as root: sudo $0" >&2
     exit 1
+fi
+
+if [[ "$PASSWORD" == "$DEFAULT_PASSWORD" && "${FORCE:-}" != "1" ]]; then
+    echo "Refusing to bring up the AP with the documented default password." >&2
+    echo "Set PASSWORD=<your-secret> or FORCE=1 to override." >&2
+    echo "Example: PASSWORD=correct-horse-battery-staple sudo -E $0" >&2
+    exit 2
 fi
 
 if ! command -v nmcli >/dev/null 2>&1; then

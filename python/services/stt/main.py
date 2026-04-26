@@ -82,13 +82,14 @@ class SttService:
 
     # -- Modes ----------------------------------------------------------------
 
+    # Pre-send sleep is the slow-joiner guard — PUSH/PULL on TCP needs a
+    # moment after connect() before send() actually crosses the wire.
+    # Post-send is handled by the socket's LINGER setting on close().
+    _CONNECT_GRACE_S = 0.15
+
     def run_once(self, text: str) -> int:
-        # Give PUSH a beat to finish connecting before we send + exit, otherwise
-        # a fresh one-shot process can drop the message during teardown.
-        time.sleep(0.15)
+        time.sleep(self._CONNECT_GRACE_S)
         self.send(text)
-        # And a short hold so the LINGER drain window has time to run.
-        time.sleep(0.2)
         return 0
 
     def run_audio_file(self, path: str) -> int:
@@ -101,9 +102,8 @@ class SttService:
             self.log.warning("whisper: no speech detected in %s", path)
             return 0
         self.log.info("whisper: %s", text)
-        time.sleep(0.15)
+        time.sleep(self._CONNECT_GRACE_S)
         self.send(text)
-        time.sleep(0.2)
         return 0
 
     def run_file(self, path: str, interval_s: float) -> int:

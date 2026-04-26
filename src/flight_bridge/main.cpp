@@ -87,28 +87,30 @@ static int run() {
         std::fprintf(stderr, "[flight-bridge] MAVSDK connection to %s failed\n", mavsdk_uri.c_str());
         return 2;
     }
-    // Wait up to 5s for a system; if none appears, handlers return errors
-    // and the telemetry thread reports flight_mode=NO_AUTOPILOT.
+    // Wait up to 5s for a system; abort if none appears so we don't run a
+    // degraded REQ/REP loop returning action_not_initialized forever.
     for (int i = 0; i < 50 && !stop_requested(); ++i) {
         for (auto& s : sdk.systems()) if (s->has_autopilot()) { ctx.system = s; break; }
         if (ctx.system) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    if (ctx.system) {
-        ctx.action    = std::make_unique<mavsdk::Action>(ctx.system);
-        ctx.offboard  = std::make_unique<mavsdk::Offboard>(ctx.system);
-        ctx.param     = std::make_unique<mavsdk::Param>(ctx.system);
-        ctx.telemetry = std::make_unique<mavsdk::Telemetry>(ctx.system);
-        // Hold the handle — MAVSDK unsubscribes when the returned handle
-        // goes out of scope, dropping all STATUSTEXT lines silently.
-        ctx.status_text_handle = ctx.telemetry->subscribe_status_text(
-            [](mavsdk::Telemetry::StatusText st) {
-                std::fprintf(stderr, "[px4] %s\n", st.text.c_str());
-            });
-        std::fprintf(stderr, "[flight-bridge] autopilot connected\n");
-    } else {
-        std::fprintf(stderr, "[flight-bridge] no autopilot found in 5s — handlers will return errors\n");
+    if (!ctx.system) {
+        std::fprintf(stderr,
+                     "[flight-bridge] no autopilot on %s after 5s — exiting\n",
+                     mavsdk_uri.c_str());
+        return 4;
     }
+    ctx.action    = std::make_unique<mavsdk::Action>(ctx.system);
+    ctx.offboard  = std::make_unique<mavsdk::Offboard>(ctx.system);
+    ctx.param     = std::make_unique<mavsdk::Param>(ctx.system);
+    ctx.telemetry = std::make_unique<mavsdk::Telemetry>(ctx.system);
+    // Hold the handle — MAVSDK unsubscribes when the returned handle
+    // goes out of scope, dropping all STATUSTEXT lines silently.
+    ctx.status_text_handle = ctx.telemetry->subscribe_status_text(
+        [](mavsdk::Telemetry::StatusText st) {
+            std::fprintf(stderr, "[px4] %s\n", st.text.c_str());
+        });
+    std::fprintf(stderr, "[flight-bridge] autopilot connected\n");
 
     // ZMQ: REP for tool calls, PUB for telemetry broadcast.
     void* zctx = zmq_ctx_new();
@@ -177,34 +179,29 @@ static int run() {
             t.qgc_connected = last_gcs_hb_ms.load() != 0
                               && (now_ms - last_gcs_hb_ms.load()) < 3000;
 
-            if (ctx.telemetry) {
-                t.connected = ctx.system && ctx.system->is_connected();
-                t.armed = ctx.telemetry->armed();
-                t.flight_mode = lexaire::flight_mode_to_string(ctx.telemetry->flight_mode());
-                auto b = ctx.telemetry->battery();
-                // PX4 returns -1 when battery monitoring is off; skip the
-                // field rather than publish "-1%".
-                if (b.remaining_percent >= 0.0f) {
-                    t.battery_pct = static_cast<int>(b.remaining_percent);
-                }
-                if (b.voltage_v > 0.0f) {
-                    t.battery_v = b.voltage_v;
-                }
-                auto p = ctx.telemetry->position();
-                t.lat = p.latitude_deg;
-                t.lon = p.longitude_deg;
-                t.abs_alt_m = p.absolute_altitude_m;
-                t.rel_alt_m = p.relative_altitude_m;
-                auto a = ctx.telemetry->attitude_euler();
-                t.roll_deg = a.roll_deg;
-                t.pitch_deg = a.pitch_deg;
-                t.yaw_deg = a.yaw_deg;
-                auto v = ctx.telemetry->velocity_ned();
-                t.ground_speed_mps = std::sqrt(v.north_m_s * v.north_m_s + v.east_m_s * v.east_m_s);
-            } else {
-                t.connected = false;
-                t.flight_mode = "NO_AUTOPILOT";
+            t.connected = ctx.system->is_connected();
+            t.armed = ctx.telemetry->armed();
+            t.flight_mode = lexaire::flight_mode_to_string(ctx.telemetry->flight_mode());
+            auto b = ctx.telemetry->battery();
+            // PX4 returns -1% when battery monitoring is off, NaN voltage on
+            // some FC configs; skip rather than publish nonsense values.
+            if (b.remaining_percent >= 0.0f) {
+                t.battery_pct = static_cast<int>(b.remaining_percent);
             }
+            if (std::isfinite(b.voltage_v) && b.voltage_v > 0.0f) {
+                t.battery_v = b.voltage_v;
+            }
+            auto p = ctx.telemetry->position();
+            t.lat = p.latitude_deg;
+            t.lon = p.longitude_deg;
+            t.abs_alt_m = p.absolute_altitude_m;
+            t.rel_alt_m = p.relative_altitude_m;
+            auto a = ctx.telemetry->attitude_euler();
+            t.roll_deg = a.roll_deg;
+            t.pitch_deg = a.pitch_deg;
+            t.yaw_deg = a.yaw_deg;
+            auto v = ctx.telemetry->velocity_ned();
+            t.ground_speed_mps = std::sqrt(v.north_m_s * v.north_m_s + v.east_m_s * v.east_m_s);
             std::string payload = t.to_json().dump();
             zmq_send(pub, payload.data(), payload.size(), 0);
             std::this_thread::sleep_for(100ms);
@@ -242,7 +239,13 @@ static int run() {
                 result = lexaire::ToolResult{call.request_id, false, "safety_denied: " + gate.reason, json::object()};
             } else {
                 result = lexaire::dispatch(call, ctx);
-                if (call.name == "disarm" && result.ok) state.armed_with_voice.store(false);
+                if (call.name == "disarm" && result.ok) {
+                    // Disarm closes the flight session: clear the spoken-arm
+                    // gate AND the abort latch so the next session can arm
+                    // again without bouncing off "abort_active".
+                    state.armed_with_voice.store(false);
+                    state.aborted.store(false);
+                }
             }
         } catch (const std::exception& e) {
             result = lexaire::ToolResult{"", false, std::string("bad_request: ") + e.what(), json::object()};

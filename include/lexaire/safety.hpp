@@ -19,7 +19,6 @@ struct SafetyEnvelope {
     double geofence_radius_m  = 10.0;
     double max_velocity_mps   = 1.5;
     bool   require_spoken_arm = true;
-    std::string abort_keyword = "abort";
 
     static SafetyEnvelope from_config(const Config& cfg) {
         SafetyEnvelope e;
@@ -27,7 +26,6 @@ struct SafetyEnvelope {
         e.geofence_radius_m  = cfg.get_or<double>("safety.geofence_radius_m",  e.geofence_radius_m);
         e.max_velocity_mps   = cfg.get_or<double>("safety.max_velocity_mps",   e.max_velocity_mps);
         e.require_spoken_arm = cfg.get_or<bool>  ("safety.require_spoken_arm", e.require_spoken_arm);
-        e.abort_keyword      = cfg.get_or<std::string>("stt.abort_keyword",    e.abort_keyword);
         return e;
     }
 };
@@ -75,6 +73,9 @@ inline SafetyDecision check_tool(const std::string& name,
     }
 
     if (name == "goto_ned") {
+        // Contract: n/e/d are PX4 local NED, origin at home (the arm
+        // location). If a future tool ever introduces "delta from current"
+        // semantics, the geofence math here silently becomes wrong.
         if (args.contains("d")) {
             double rel_alt = -as_d("d");
             if (rel_alt > env.max_altitude_m)

@@ -8,9 +8,11 @@ drone:
   mavsdk_udp:    udpout://drone.local:14551
 
 sensor:
-  # Pointer to the sensor publisher project — any docker-based ZMQ
-  # publisher works; Lexaire just subscribes to the channels below.
-  # Default: Intel RealSense L515 (RGB + depth + IMU + IR + confidence).
+  # Documentation-only pointer to the sensor publisher project the operator
+  # deploys on the Pi — any docker-based ZMQ publisher works as long as it
+  # binds the channels below with the matching encoding. Default: Intel
+  # RealSense L515 (RGB + depth + IMU + IR + confidence). No code reads
+  # this field; it's here so the project is self-documenting.
   publisher_repo: https://github.com/9LogM/RS-L515-Docker
 
   # ZMQ endpoint per stream. Leave a value blank to disable that channel
@@ -60,9 +62,6 @@ orchestrator:
   telemetry_history_seconds:  5.0
   # Hard cap on a mission's re-prompt loop. Bounds Gemini calls per mission.
   mission_max_steps:          10
-  # Reserved: tick-based wakeup rate for a future "watch telemetry while
-  # idle and react proactively" feature. Not yet read by the orchestrator.
-  mission_tick_hz:            1.0
 
 services:
   # Endpoints bound by the named service; everyone else connects.

@@ -43,9 +43,6 @@ struct AppContext {
     std::string  drone_host;
     std::string  serial_device;
     int          serial_baud   = 0;
-    std::string  scene_pub_ep;
-    std::string  telem_pub_ep;
-    std::string  orch_pub_ep;
 
     std::unique_ptr<ServicesWatcher>  services_watcher;
 
@@ -613,9 +610,6 @@ int main() {
     ctx.drone_host    = drone_host;
     ctx.serial_device = serial_device;
     ctx.serial_baud   = serial_baud;
-    ctx.scene_pub_ep  = scene_pub_ep;
-    ctx.telem_pub_ep  = telem_pub_ep;
-    ctx.orch_pub_ep   = orch_pub_ep;
 
     ctx.signals.async_wait([&ctx](const boost::system::error_code&, int) {
         endwin();

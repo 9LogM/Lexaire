@@ -45,6 +45,11 @@ from .vlm_base import VLM, VlmContext
 # stops re-prompting the VLM and returns to idle.
 _TERMINAL_TOOLS = frozenset({"hold", "land", "abort", "return_to_launch", "kill", "disarm"})
 
+# Mission re-prompt loop bails when the same (tool, error) appears at least
+# _STUCK_FAILURE_THRESHOLD times in the trailing _STUCK_FAILURE_WINDOW steps.
+_STUCK_FAILURE_WINDOW = 4
+_STUCK_FAILURE_THRESHOLD = 2
+
 
 @dataclasses.dataclass
 class OrchestratorMission:
@@ -128,6 +133,11 @@ class Orchestrator:
         self._bridge_offline_flag = False
         self._bridge_lock = threading.Lock()
 
+        # _publish_status is currently called only from the main thread, but
+        # this lock guards against a future call site introduced from a
+        # worker thread — PyZMQ sockets are not safe for concurrent send().
+        self._status_lock = threading.Lock()
+
         # Lazy REQ socket; recycled on timeout because REQ doesn't tolerate
         # a missed recv (strict send/recv state machine).
         self._req_socket: Optional[zmq.Socket] = None
@@ -163,14 +173,7 @@ class Orchestrator:
     # -- Sockets --------------------------------------------------------------
 
     def _run_command_thread(self):
-        cmd_ep = self.cfg.require("services.orchestrator_command_pull")
-        from urllib.parse import urlparse
-        u = urlparse(cmd_ep)
-        bind_ep = f"tcp://*:{u.port}" if u.port else cmd_ep
-        pull = self._zmq.socket(zmq.PULL)
-        pull.setsockopt(zmq.RCVHWM, 16)
-        pull.setsockopt(zmq.LINGER, 0)
-        pull.bind(bind_ep)
+        pull = transport.pull(self._zmq, self.cfg.require("services.orchestrator_command_pull"))
         self.command_pull = pull
         poller = zmq.Poller()
         poller.register(pull, zmq.POLLIN)
@@ -294,18 +297,20 @@ class Orchestrator:
                 if result.error == "bridge_offline":
                     offline = True
                     break
-                # Bail on two consecutive identical (tool, error) failures —
-                # without this, a stuck preflight (e.g. PX4 'Arming denied')
-                # burns Gemini calls until max_steps.
-                if (not result.ok and len(mission.step_history) >= 2):
-                    last = mission.step_history[-1]
-                    prev = mission.step_history[-2]
-                    if (last["tool"] == prev["tool"]
-                            and last["error"] == prev["error"]
-                            and last["error"] is not None):
+                # Bail when the same (tool, error) pair has appeared
+                # `_STUCK_FAILURE_THRESHOLD` times in the recent history.
+                # Catches the consecutive-identical case (PX4 'Arming
+                # denied' loop) AND oscillation (arm/get_telemetry/arm/
+                # get_telemetry...) without re-prompting Gemini further.
+                if not result.ok and result.error is not None:
+                    matches = sum(
+                        1 for step in mission.step_history[-_STUCK_FAILURE_WINDOW:]
+                        if step["tool"] == tc.name and step["error"] == result.error
+                    )
+                    if matches >= _STUCK_FAILURE_THRESHOLD:
                         self.log.warning(
-                            "mission stuck: %s keeps failing with %r; bailing",
-                            last["tool"], last["error"])
+                            "mission stuck: %s failed %d times with %r; bailing",
+                            tc.name, matches, result.error)
                         stuck = True
                         break
                 if tc.name in _TERMINAL_TOOLS:
@@ -436,13 +441,14 @@ class Orchestrator:
             last_thought=note,
             last_action=self.history[-1] if self.history else "",
         )
-        try:
-            self.status_pub.send(encode_header(msg))
-        except zmq.ZMQError as e:
-            # Status PUB is non-load-bearing for control flow, but a send
-            # failure here means the TUI has stopped seeing us — surface it
-            # rather than swallow it.
-            self.log.warning("status_pub send failed (%s): %r", e, msg)
+        with self._status_lock:
+            try:
+                self.status_pub.send(encode_header(msg))
+            except zmq.ZMQError as e:
+                # Status PUB is non-load-bearing for control flow, but a
+                # send failure here means the TUI has stopped seeing us —
+                # surface rather than swallow.
+                self.log.warning("status_pub send failed (%s): %r", e, msg)
 
 
 def cli() -> int:

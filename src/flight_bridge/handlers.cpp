@@ -158,7 +158,13 @@ ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
     return err(c.request_id, action_result_to_string(r));
 }
 
-// Operator-only; not in tool_schemas() — the VLM cannot reach it.
+// ---- Operator-only handlers ----
+// The dispatch table includes the handlers below, but tool_schemas() in
+// python/services/orchestrator/tools.py does NOT, so the VLM can't reach
+// them. They're the bridge's REPL surface for human operators talking to
+// the REQ socket directly (e.g. via a debug script). Do not expose to the
+// VLM without thinking through safety implications first.
+
 ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     std::string name = c.args.value("name", "");
     if (name.empty()) return err(c.request_id, "missing_param_name");
@@ -207,8 +213,11 @@ ToolResult handle_get_telemetry(const ToolCall& c, FlightCtx& ctx) {
     return ok(c.request_id, std::move(data));
 }
 
-// Seed a zero-velocity setpoint, enter OFFBOARD, and hold for >1s so PX4's
-// proof-of-life check passes before a follow-up arm.
+// Seeds a zero-velocity setpoint and enters OFFBOARD. MAVSDK keeps the
+// setpoint streaming at ~50 Hz from here. Returns immediately; PX4 needs
+// roughly a second of streamed setpoints before it'll accept a follow-up
+// arm, so the operator/orchestrator should retry on the first
+// command_denied if it races the mode transition.
 // Ref: docs.px4.io/main/en/flight_modes/offboard
 ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
@@ -219,8 +228,7 @@ ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
     if (r != Offboard::Result::Success && r != Offboard::Result::Busy) {
         return err(c.request_id, "offboard_start_failed:" + offboard_result_to_string(r));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-    std::fprintf(stderr, "[flight-bridge] offboard active\n");
+    std::fprintf(stderr, "[flight-bridge] offboard initiated\n");
     return ok(c.request_id);
 }
 

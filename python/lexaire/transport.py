@@ -46,3 +46,11 @@ def push(ctx: zmq.Context, endpoint: str, *,
     s.setsockopt(zmq.LINGER, linger_ms)
     s.connect(endpoint)
     return s
+
+
+def pull(ctx: zmq.Context, endpoint: str, *, hwm: int = 16) -> zmq.Socket:
+    s = ctx.socket(zmq.PULL)
+    s.setsockopt(zmq.RCVHWM, hwm)
+    s.setsockopt(zmq.LINGER, 0)
+    s.bind(_bind_ep(endpoint))
+    return s
