@@ -86,8 +86,18 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "name": "abort",
             "description": (
-                "Abort the current mission and kill the motors. Use only as an emergency — "
-                "this is the kill switch, not a 'stop gently' command."
+                "Safe stop: trigger an immediate controlled landing. Use this when the pilot "
+                "says 'abort'/'stop' or you detect an unsafe situation that needs the vehicle "
+                "on the ground now. This is the right tool for almost all emergencies."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "kill",
+            "description": (
+                "Emergency motor-off: cuts power to the motors instantly. The drone falls. "
+                "Use ONLY when a controlled landing is unsafe (e.g. the drone is about to "
+                "strike a person and you must drop it now). For everything else, use `abort`."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },

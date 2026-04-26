@@ -152,9 +152,24 @@ ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
     return err(c.request_id, offboard_result_to_string(r));
 }
 
+// `abort` is the user-driven safe-stop: pilot voice says "abort", we want a
+// controlled descent + motors-off-on-touchdown, not a free fall. For an
+// instant motor-cut emergency, see `handle_kill`.
 ToolResult handle_abort(const ToolCall& c, FlightCtx& ctx) {
     if (ctx.safety) ctx.safety->aborted.store(true);
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] abort -> disarm\n"); return ok(c.request_id); }
+    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] abort -> land\n"); return ok(c.request_id); }
+    if (!ctx.action) return err(c.request_id, "action_not_initialized");
+    auto r = ctx.action->land();
+    if (r == Action::Result::Success) return ok(c.request_id);
+    return err(c.request_id, action_result_to_string(r));
+}
+
+// `kill` cuts motors instantly. Reserved for emergencies where a controlled
+// descent is unsafe (e.g. drone is about to hit a person). Sets the same
+// aborted flag so subsequent tool calls are gated.
+ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
+    if (ctx.safety) ctx.safety->aborted.store(true);
+    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] kill -> motors off\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     auto r = ctx.action->kill();
     if (r == Action::Result::Success) return ok(c.request_id);
@@ -281,6 +296,7 @@ ToolResult dispatch(const ToolCall& call, FlightCtx& ctx) {
         {"goto_ned",          &handle_goto_ned},
         {"set_velocity_ned",  &handle_set_velocity_ned},
         {"abort",             &handle_abort},
+        {"kill",              &handle_kill},
         {"get_telemetry",     &handle_get_telemetry},
         {"set_param",         &handle_set_param},
         {"get_param",         &handle_get_param},
