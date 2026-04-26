@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -45,8 +46,17 @@ static int run(bool dummy) {
     const std::string telemetry_ep = cfg.require<std::string>("services.telemetry_pub");
     const std::string mavsdk_uri   = cfg.require<std::string>("drone.mavsdk_udp");
 
-    std::fprintf(stderr, "[flight-bridge] starting  rep=%s  telemetry=%s  mode=%s\n",
-                 rep_ep.c_str(), telemetry_ep.c_str(), dummy ? "DUMMY" : "LIVE");
+    // Phase 2A: heartbeat-loss recovery. If the MAVSDK autopilot connection
+    // drops while armed, the bridge auto-issues an RTL or HOLD after a
+    // configurable threshold. Default rtl@2.0s.
+    const double hb_threshold_s = cfg.get_or<double>("safety.heartbeat_loss_threshold_s", 2.0);
+    const std::string hb_action = cfg.get_or<std::string>("safety.heartbeat_loss_action", "rtl");
+
+    std::fprintf(stderr,
+                 "[flight-bridge] starting  rep=%s  telemetry=%s  mode=%s  "
+                 "heartbeat-loss: action=%s threshold=%.1fs\n",
+                 rep_ep.c_str(), telemetry_ep.c_str(), dummy ? "DUMMY" : "LIVE",
+                 hb_action.c_str(), hb_threshold_s);
 
     // MAVSDK setup.
     lexaire::FlightCtx ctx;
@@ -103,6 +113,52 @@ static int run(bool dummy) {
         std::fprintf(stderr, "[flight-bridge] zmq_bind PUB %s failed: %s\n", tele_bind.c_str(), zmq_strerror(zmq_errno()));
         return 3;
     }
+
+    // Heartbeat watchdog. Polls the MAVSDK system's connection state at
+    // 5 Hz; if it stays disconnected past `hb_threshold_s` while the
+    // autopilot reports armed and !on_ground, auto-issue RTL (or HOLD,
+    // configurable). One-shot per disconnection — won't re-fire until the
+    // link comes back.
+    //
+    // Skipped when --dummy or no autopilot ever connected (nothing to fly
+    // home).
+    std::thread heartbeat_thread([&]() {
+        if (dummy || !ctx.system || !ctx.action || !ctx.telemetry) return;
+        using namespace std::chrono_literals;
+        using clk = std::chrono::steady_clock;
+        std::optional<clk::time_point> disconnect_at;
+        bool action_fired = false;
+        while (!g_stop.load()) {
+            std::this_thread::sleep_for(200ms);
+            const bool connected = ctx.system->is_connected();
+            if (connected) {
+                disconnect_at.reset();
+                action_fired = false;
+                continue;
+            }
+            if (!disconnect_at) disconnect_at = clk::now();
+            const double age_s = std::chrono::duration<double>(
+                clk::now() - *disconnect_at).count();
+            if (age_s < hb_threshold_s || action_fired) continue;
+            // We can't read armed/in-air via MAVSDK once disconnected, so
+            // gate on the spoken-arm state we maintain locally — it tracks
+            // an active armed session.
+            if (!state.armed_with_voice.load()) {
+                action_fired = true;  // suppress spam; nothing to do.
+                continue;
+            }
+            std::fprintf(stderr,
+                         "[flight-bridge] heartbeat lost %.1fs — issuing %s\n",
+                         age_s, hb_action.c_str());
+            mavsdk::Action::Result r = mavsdk::Action::Result::Unknown;
+            if (hb_action == "hold")      r = ctx.action->hold();
+            else                          r = ctx.action->return_to_launch();
+            std::fprintf(stderr, "[flight-bridge] heartbeat-loss %s -> %s\n",
+                         hb_action.c_str(),
+                         r == mavsdk::Action::Result::Success ? "ok" : "failed");
+            action_fired = true;
+        }
+    });
 
     // Telemetry broadcaster thread.
     std::thread tele_thread([&]() {
@@ -180,6 +236,7 @@ static int run(bool dummy) {
     }
 
     g_stop.store(true);
+    if (heartbeat_thread.joinable()) heartbeat_thread.join();
     if (tele_thread.joinable()) tele_thread.join();
     zmq_close(rep);
     zmq_close(pub);
