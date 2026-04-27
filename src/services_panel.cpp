@@ -103,16 +103,11 @@ void parse_telemetry(const std::string& header, TelemetrySnapshot& out) {
     out.armed         = j.value("armed",         false);
     out.flight_mode   = j.value("flight_mode",   std::string{"N/A"});
 
-    if (j.contains("battery_pct") && !j["battery_pct"].is_null()) {
-        out.has_battery = true;
-        out.battery_pct = j["battery_pct"].get<int>();
-    }
-    if (j.contains("battery_v") && !j["battery_v"].is_null() && !out.has_battery) {
-        out.has_battery = true;
-    }
-    if (j.contains("battery_v") && !j["battery_v"].is_null()) {
-        out.battery_v = j["battery_v"].get<float>();
-    }
+    const bool has_pct = j.contains("battery_pct") && !j["battery_pct"].is_null();
+    const bool has_v   = j.contains("battery_v")   && !j["battery_v"].is_null();
+    out.has_battery = has_pct || has_v;
+    if (has_pct) out.battery_pct = j["battery_pct"].get<int>();
+    if (has_v)   out.battery_v   = j["battery_v"].get<float>();
 
     if (j.contains("lat") && !j["lat"].is_null() &&
         j.contains("lon") && !j["lon"].is_null()) {

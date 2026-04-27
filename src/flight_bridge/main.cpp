@@ -49,6 +49,12 @@ static int run() {
     // for what these gate.
     const double hb_threshold_s = cfg.get_or<double>("safety.heartbeat_loss_threshold_s", 2.0);
     const std::string hb_action = cfg.get_or<std::string>("safety.heartbeat_loss_action", "rtl");
+    if (hb_action != "rtl" && hb_action != "hold") {
+        std::fprintf(stderr,
+                     "[flight-bridge] invalid safety.heartbeat_loss_action='%s' "
+                     "(expected 'rtl' or 'hold')\n", hb_action.c_str());
+        return 5;
+    }
 
     std::fprintf(stderr,
                  "[flight-bridge] starting  rep=%s  telemetry=%s  "
@@ -104,12 +110,20 @@ static int run() {
     ctx.offboard  = std::make_unique<mavsdk::Offboard>(ctx.system);
     ctx.param     = std::make_unique<mavsdk::Param>(ctx.system);
     ctx.telemetry = std::make_unique<mavsdk::Telemetry>(ctx.system);
-    // Hold the handle — MAVSDK unsubscribes when the returned handle
-    // goes out of scope, dropping all STATUSTEXT lines silently.
+    // Hold the handles — MAVSDK unsubscribes when each goes out of scope.
     ctx.status_text_handle = ctx.telemetry->subscribe_status_text(
         [](mavsdk::Telemetry::StatusText st) {
             std::fprintf(stderr, "[px4] %s\n", st.text.c_str());
         });
+    // Falling-edge of `armed` (touchdown auto-disarm or external disarm)
+    // ends the flight session: clear both session latches so the next
+    // session starts clean even if no Lexaire `disarm` tool ran.
+    ctx.armed_handle = ctx.telemetry->subscribe_armed([&state](bool armed) {
+        if (!armed) {
+            state.armed_with_voice.store(false);
+            state.aborted.store(false);
+        }
+    });
     std::fprintf(stderr, "[flight-bridge] autopilot connected\n");
 
     // ZMQ: REP for tool calls, PUB for telemetry broadcast.
@@ -132,7 +146,10 @@ static int run() {
 
     // armed_with_voice is the gate because we can't read armed/in-air via
     // MAVSDK once the link drops; the locally-tracked flag approximates
-    // "an active armed session was in progress".
+    // "an active armed session was in progress". Corner case: an operator
+    // who armed via QGC instead of voice (manual override) won't trip
+    // this watchdog. Voice-first is the documented baseline so this is
+    // by design.
     std::thread heartbeat_thread([&]() {
         if (!ctx.system || !ctx.action || !ctx.telemetry) return;
         using namespace std::chrono_literals;

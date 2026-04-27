@@ -22,6 +22,7 @@ import collections
 import dataclasses
 import json
 import queue
+import re
 import signal
 import sys
 import threading
@@ -142,6 +143,13 @@ class Orchestrator:
         # a missed recv (strict send/recv state machine).
         self._req_socket: Optional[zmq.Socket] = None
 
+        # Word-boundary match so "laboratory" / "abortive" don't trip the
+        # abort path. STT also flags is_abort up front; this is the
+        # belt-and-suspenders check on text we receive directly.
+        abort_kw = cfg.get("stt.abort_keyword", "abort")
+        self._abort_pattern = re.compile(
+            rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
+
     # -- Lifecycle ------------------------------------------------------------
 
     def start(self):
@@ -253,8 +261,14 @@ class Orchestrator:
             self._on_command(cmd)
 
     def _on_command(self, cmd: VoiceCommand):
-        abort_kw = self.cfg.get("stt.abort_keyword", "abort").lower()
-        if cmd.is_abort or abort_kw in cmd.text.lower():
+        # Each new voice command gets a fresh attempt — without this, a
+        # single REQ timeout would lock out the orchestrator forever
+        # (the on-success clear at line ~424 is unreachable while the
+        # short-circuit at the top of _dispatch_tool_call returns early).
+        with self._bridge_lock:
+            self._bridge_offline_flag = False
+
+        if cmd.is_abort or self._abort_pattern.search(cmd.text):
             self._publish_status("aborted", f"abort keyword: {cmd.text!r}")
             self._dispatch_tool_call(ToolCall(
                 request_id=VLM.new_request_id(),
@@ -267,6 +281,7 @@ class Orchestrator:
         mission = OrchestratorMission(goal_text=cmd.text, started_ts_ns=now_ns())
         terminal_call: Optional[str] = None
         stuck = False
+        vlm_error: Optional[str] = None
 
         # Re-prompt the VLM with each tool result; bounded by max_steps and
         # preempted by a fresh voice command (next run() iteration picks it up).
@@ -283,7 +298,12 @@ class Orchestrator:
                           step_label, decision.thought, len(decision.tool_calls))
 
             if not decision.tool_calls:
-                # VLM had nothing to say — treat as natural end of mission.
+                if decision.thought.startswith("vlm_error:"):
+                    # Quota / network / key error from the VLM backend.
+                    # Surface as its own status so the TUI shows red, not
+                    # "idle" with a stale thought string.
+                    vlm_error = decision.thought
+                    self.log.error("VLM call failed: %s", decision.thought)
                 break
 
             self._publish_status("executing", decision.thought)
@@ -324,6 +344,8 @@ class Orchestrator:
             end_reason = f"terminal:{terminal_call}"
         elif self._bridge_offline():
             end_reason = "bridge_offline"
+        elif vlm_error is not None:
+            end_reason = "vlm_error"
         elif mission.current_step >= max_steps:
             end_reason = f"max_steps={max_steps}"
         elif stuck:
@@ -334,9 +356,11 @@ class Orchestrator:
             f"user: {cmd.text} | steps: {mission.current_step} | end: {end_reason}"
         )
         self.history[:] = self.history[-20:]
-        # Bridge-offline already published its own status during dispatch;
-        # let it stick for the TUI rather than overwriting with "idle".
-        if end_reason != "bridge_offline":
+        # Bridge-offline and vlm_error already / want to surface their own
+        # state — don't overwrite with "idle" at end of mission.
+        if end_reason == "vlm_error":
+            self._publish_status("vlm_error", vlm_error or "vlm_error")
+        elif end_reason != "bridge_offline":
             self._publish_status("idle", f"mission done ({end_reason})")
 
     def _build_context(
@@ -439,7 +463,6 @@ class Orchestrator:
             ts_ns=now_ns(),
             state=state,
             last_thought=note,
-            last_action=self.history[-1] if self.history else "",
         )
         with self._status_lock:
             try:

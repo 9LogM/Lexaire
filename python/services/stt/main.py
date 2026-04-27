@@ -23,6 +23,7 @@ straight to the abort tool without waiting on the VLM.
 from __future__ import annotations
 
 import argparse
+import re
 import signal
 import sys
 import threading
@@ -45,7 +46,10 @@ class SttService:
         # so text-mode runs don't waste seconds + GPU memory.
         self._whisper = None
 
-        self.abort_kw = cfg.get("stt.abort_keyword", "abort").lower().strip()
+        # Word-boundary so "laboratory"/"abortive" don't trip the abort flag.
+        abort_kw = cfg.get("stt.abort_keyword", "abort").strip()
+        self._abort_pattern = re.compile(
+            rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
         self._zmq = zmq.Context()
         self.push = transport.push(self._zmq, cfg.require("services.orchestrator_command_pull"))
 
@@ -74,7 +78,7 @@ class SttService:
         text = (text or "").strip()
         if not text:
             return False
-        is_abort = self.abort_kw in text.lower()
+        is_abort = bool(self._abort_pattern.search(text))
         cmd = VoiceCommand(ts_ns=now_ns(), text=text, is_abort=is_abort)
         self.push.send(encode_header(cmd))
         self.log.info("-> %s%s", text, "  [ABORT]" if is_abort else "")

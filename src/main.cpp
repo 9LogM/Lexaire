@@ -259,11 +259,11 @@ static void render(const AppContext& ctx) {
         mvprintw(r++, 4, "%s", std::string(70, '-').c_str());
         attroff(A_DIM);
 
-        // Orchestrator can publish "bridge_offline" as its state when the
-        // flight-bridge REQ socket has gone silent past threshold. Force
-        // that row red regardless of staleness — it's an alarm condition
-        // even if the orchestrator itself is publishing healthily.
+        // Force the orchestrator row red on alarm states even if the
+        // orchestrator itself is publishing healthily.
         const bool bridge_offline = (snap.orch_state == "bridge_offline");
+        const bool vlm_error     = (snap.orch_state == "vlm_error");
+        const bool orch_alarm    = bridge_offline || vlm_error;
 
         auto row = [&](const char* name, long long ms, const std::string& detail,
                         int forced_pair = 0) {
@@ -286,11 +286,15 @@ static void render(const AppContext& ctx) {
             orch_line += snap.orch_thought;
         }
         row("orchestrator",  age_ms(snap.orch_last_ns),       orch_line,
-            bridge_offline ? 3 : 0);
+            orch_alarm ? 3 : 0);
 
         if (bridge_offline) {
             attron(COLOR_PAIR(3) | A_BOLD);
             mvprintw(r++, 4, ">> FLIGHT BRIDGE OFFLINE - tool calls suspended");
+            attroff(COLOR_PAIR(3) | A_BOLD);
+        } else if (vlm_error) {
+            attron(COLOR_PAIR(3) | A_BOLD);
+            mvprintw(r++, 4, ">> VLM ERROR - check API key, quota, network");
             attroff(COLOR_PAIR(3) | A_BOLD);
         }
 

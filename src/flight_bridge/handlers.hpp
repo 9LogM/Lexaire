@@ -31,6 +31,7 @@ struct FlightCtx {
     std::unique_ptr<mavsdk::Telemetry> telemetry;
     // Subscription handles — must outlive the ctx for callbacks to keep firing.
     mavsdk::Telemetry::StatusTextHandle status_text_handle{};
+    mavsdk::Telemetry::ArmedHandle      armed_handle{};
     SafetyState* safety = nullptr;
 };
 

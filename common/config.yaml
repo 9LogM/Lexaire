@@ -20,11 +20,14 @@ sensor:
   # (perception requires rgb+depth) will fail at startup with a clear
   # error if it's blank.
   channels:
+    # Live consumers: perception + orchestrator subscribe to rgb + depth.
+    # imu / infrared / confidence are published for replay capture and
+    # future SLAM consumers; no live service subscribes to them today.
     rgb:        tcp://drone.local:5555    # color, JPEG-encoded
     depth:      tcp://drone.local:5556    # z16, zstd-compressed
-    imu:        tcp://drone.local:5557    # accel + gyro samples
-    infrared:   tcp://drone.local:5558    # y8, zstd-compressed
-    confidence: tcp://drone.local:5559    # raw8 confidence map (L515-specific)
+    imu:        tcp://drone.local:5557    # accel + gyro samples (record-only)
+    infrared:   tcp://drone.local:5558    # y8, zstd-compressed (record-only)
+    confidence: tcp://drone.local:5559    # raw8 confidence map (record-only, L515-specific)
 
 perception:
   tick_hz: 2

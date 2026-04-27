@@ -7,7 +7,9 @@ present, is a binary payload.
 Channels:
     sensor.rgb        PUB/SUB   header + jpeg bytes
     sensor.depth      PUB/SUB   header + zstd(z16 LE) bytes
-    sensor.imu        PUB/SUB   header + 3xf32 LE bytes
+    sensor.imu        PUB/SUB   header only (accel + gyro samples in JSON)
+    sensor.infrared   PUB/SUB   header + zstd(y8) bytes
+    sensor.confidence PUB/SUB   header + zstd(raw8) bytes
     perception.scene  PUB/SUB   header only (JSON contains the detection list)
     telemetry         PUB/SUB   header only
     orch.status       PUB/SUB   header only
@@ -65,9 +67,8 @@ class ToolResult:
 @dataclass
 class OrchestratorStatus:
     ts_ns: int
-    state: str                       # "idle" | "thinking" | "executing" | "aborted"
+    state: str                       # "idle" | "thinking" | "executing" | "aborted" | "bridge_offline" | "vlm_error"
     last_thought: str = ""
-    last_action: str = ""
 
 
 def now_ns() -> int:

@@ -44,12 +44,13 @@ inline SafetyDecision check_tool(const std::string& name,
                                   const nlohmann::json& args,
                                   const SafetyEnvelope& env,
                                   const SafetyState& state) {
-    // Kill is the strictly-worse escalation of abort — if abort fires and
-    // the pilot then sees they need a motor-cut after all, the gate must
-    // not get in the way. Same logic for `land` — if abort somehow didn't
-    // produce a descent (e.g. PX4 rejected the mode), the pilot's follow-up
-    // land must reach the bridge.
-    const bool is_emergency_followup = (name == "kill" || name == "land");
+    // Tools that must reach the bridge even when the abort latch is set:
+    //   kill / land — the strictly-worse escalations of abort.
+    //   disarm      — the operator's "I'm done, clear the latch" path; if
+    //                 we deny it, the latch never clears (the dispatch's
+    //                 on-success clear runs only when the gate passes).
+    const bool is_emergency_followup =
+        (name == "kill" || name == "land" || name == "disarm");
     if (state.aborted.load() && !is_emergency_followup) {
         return {false, "abort_active"};
     }
