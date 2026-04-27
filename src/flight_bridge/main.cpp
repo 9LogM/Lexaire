@@ -193,8 +193,10 @@ static int run() {
             t.ts_ns = lexaire::now_ns();
             const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            t.qgc_connected = last_gcs_hb_ms.load() != 0
-                              && (now_ms - last_gcs_hb_ms.load()) < 3000;
+            // Snapshot once — two .load()s could see different values if the
+            // intercept thread fires between them.
+            const auto last_hb = last_gcs_hb_ms.load();
+            t.qgc_connected = last_hb != 0 && (now_ms - last_hb) < 3000;
 
             t.connected = ctx.system->is_connected();
             t.armed = ctx.telemetry->armed();

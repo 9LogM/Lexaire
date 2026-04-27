@@ -31,7 +31,6 @@ target_include_directories(lexaire PRIVATE
 )
 
 target_link_libraries(lexaire PRIVATE
-    MAVSDK::mavsdk
     Boost::system
     Threads::Threads
     ${CURSES_LIBRARIES}

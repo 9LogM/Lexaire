@@ -70,11 +70,9 @@ std::string summarize_telemetry(const std::string& header) {
         const bool connected = j.value("connected", false);
         const std::string mode = j.value("flight_mode", "");
 
-        // "no autopilot" needs cable/relay; "timeout" needs FC power/RC.
-        if (!connected) {
-            if (mode == "NO_AUTOPILOT") return "no autopilot at startup";
-            return "autopilot heartbeat timeout";
-        }
+        // The bridge exits at startup if no autopilot appears, so any
+        // !connected we see here is a heartbeat drop on a previously-up link.
+        if (!connected) return "autopilot heartbeat timeout";
 
         std::ostringstream ss;
         ss << mode;

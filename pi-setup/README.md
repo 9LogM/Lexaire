@@ -9,7 +9,7 @@ Turns the Pi's `wlan0` into a WPA2 access point using NetworkManager (Pi OS Book
 Remote invocation (from the ground station) pipes the script over SSH so nothing needs pre-copying:
 
 ```bash
-ssh orbis@drone.lan "sudo bash -s" < pi-setup/setup-ap.sh
+ssh orbis@drone.local "sudo bash -s" < pi-setup/setup-ap.sh
 ```
 
 Overrides via env vars:

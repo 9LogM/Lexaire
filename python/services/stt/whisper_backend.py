@@ -78,9 +78,10 @@ class FasterWhisperBackend:
 def load_wav_as_f32_mono_16k(path: str | Path) -> np.ndarray:
     """Load a WAV file and return a float32 mono array at 16 kHz.
 
-    Uses the stdlib `wave` module — no extra deps. Handles 16-bit / 24-bit /
-    32-bit PCM and basic channel collapsing. Resampling is linear (rough but
-    fine for whisper; swap in scipy.signal.resample_poly if you need better)."""
+    Uses the stdlib `wave` module — no extra deps. Handles 8/16/32-bit PCM
+    (24-bit is rejected with ValueError) and basic channel collapsing.
+    Resampling is linear (rough but fine for whisper; swap in
+    scipy.signal.resample_poly if you need better)."""
     path = Path(path)
     with wave.open(str(path), "rb") as wf:
         n_channels = wf.getnchannels()

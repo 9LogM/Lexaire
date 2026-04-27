@@ -29,9 +29,13 @@ services:
   # Every container that needs to reach the Pi maps drone.local -> the IP
   # in DRONE_PI_IP from .env. Compose substitutes at parse time; if the
   # var is unset, ${DRONE_PI_IP:?...} stops compose with a clear message.
+  # Restart on crash so a mid-flight OOM/segfault doesn't leave the stack
+  # half-up. `on-failure:5` rather than `unless-stopped` so a stop signal
+  # from `docker compose down` actually stops the container.
   flight-bridge:
     image: lexaire-cpp:latest
     container_name: lexaire-flight-bridge
+    restart: on-failure:5
     entrypoint: []
     command: ["/workspace/build/lexaire-flight-bridge"]
     extra_hosts:
@@ -45,6 +49,7 @@ services:
       dockerfile: python/Dockerfile
     image: lexaire-python:latest
     container_name: lexaire-perception
+    restart: on-failure:5
     env_file:
       - path: .env
         required: false
@@ -59,6 +64,7 @@ services:
     depends_on:
       - perception
     container_name: lexaire-orchestrator
+    restart: on-failure:5
     env_file:
       - path: .env
         required: false

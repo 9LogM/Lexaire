@@ -15,7 +15,7 @@
 #
 # One-liner from the ground station (pipes the script to the Pi's shell,
 # no pre-copy required):
-#     ssh orbis@drone.lan "sudo bash -s" < pi-setup/setup-ap.sh
+#     ssh orbis@drone.local "sudo bash -s" < pi-setup/setup-ap.sh
 #
 # After a successful run, join the printed SSID from the laptop and set
 # the drone hostname in common/config.yaml to the printed Pi IP.
