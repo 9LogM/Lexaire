@@ -46,11 +46,14 @@ struct AppContext {
 
     std::unique_ptr<ServicesWatcher>  services_watcher;
 
+    boost::asio::steady_timer    stack_timer;    // periodic re-check of GCS stack state
+
     AppContext()
-        : signals(io, SIGINT)
+        : signals(io, SIGINT, SIGTERM)
         , input_timer(io)
         , render_timer(io)
-        , refresh_timer(io) {}
+        , refresh_timer(io)
+        , stack_timer(io) {}
 };
 
 static ServicesSnapshot current_snapshot(const AppContext& ctx) {
@@ -85,7 +88,7 @@ static void draw_header(const AppContext& ctx) {
     const bool heartbeat = autopilot_link;
     std::string relay_label = "Relay: ";
     std::string relay_status;
-    int relay_color;
+    int relay_color = 3;
     switch (ctx.relay_state) {
         case ServiceState::Up:
             relay_status = heartbeat ? "Active" : "No Heartbeat";
@@ -113,7 +116,7 @@ static void draw_header(const AppContext& ctx) {
 
     std::string stack_label = "Stack: ";
     std::string stack_status;
-    int stack_color;
+    int stack_color = 3;
     switch (ctx.stack_state) {
         case ServiceState::Up:        stack_status = "Up";        stack_color = 1; break;
         case ServiceState::Deploying: stack_status = "Starting..."; stack_color = 2; break;
@@ -561,9 +564,9 @@ static void ensure_relay_running(AppContext& ctx) {
     );
 }
 
-static void check_stack_once(AppContext& ctx) {
-    // Any of the core GCS services up → stack is considered running. Ignores
-    // `lexaire` (build-only) and the `tools` profile entries.
+static void refresh_stack_state(AppContext& ctx) {
+    // `lexaire` is build-only and `tools` profile services aren't part of the
+    // running stack — match only the long-running core trio.
     std::string cmd = ps_query_shell(
         "",
         "--filter name=lexaire-perception "
@@ -572,8 +575,12 @@ static void check_stack_once(AppContext& ctx) {
     boost::process::async_system(
         ctx.io,
         [&ctx](boost::system::error_code, int exit_code) {
-            ctx.stack_state = exit_to_state(exit_code);
-            request_render(ctx);
+            const ServiceState next = exit_to_state(exit_code);
+            // Don't overwrite a Deploying state mid-restart.
+            if (ctx.stack_state != ServiceState::Deploying) {
+                ctx.stack_state = next;
+                request_render(ctx);
+            }
         },
         boost::process::shell, cmd
     );
@@ -635,8 +642,20 @@ int main() {
     };
     refresh_tick();
 
+    // docker ps every 500ms would be wasteful; 3s is fast enough that the
+    // header tracks stack state when it's started/stopped outside the TUI.
+    std::function<void()> stack_tick;
+    stack_tick = [&ctx, &stack_tick]() {
+        refresh_stack_state(ctx);
+        ctx.stack_timer.expires_after(std::chrono::seconds(3));
+        ctx.stack_timer.async_wait(
+            [&stack_tick](const boost::system::error_code& ec) {
+                if (!ec) stack_tick();
+            });
+    };
+    stack_tick();
+
     ensure_relay_running(ctx);
-    check_stack_once(ctx);
     render(ctx);
     start_input_poll(ctx);
     ctx.io.run();

@@ -233,14 +233,22 @@ static int run() {
         int rc = zmq_poll(items, 1, 250);
         if (rc <= 0) continue;
 
-        char buf[8192];
-        int n = zmq_recv(rep, buf, sizeof(buf) - 1, 0);
-        if (n < 0) continue;
-        buf[n] = 0;
+        // zmq_msg_t auto-sizes; a fixed buffer would silently truncate any
+        // tool call larger than the buffer.
+        zmq_msg_t msg;
+        zmq_msg_init(&msg);
+        int n = zmq_msg_recv(&msg, rep, 0);
+        if (n < 0) {
+            zmq_msg_close(&msg);
+            continue;
+        }
+        std::string raw(static_cast<const char*>(zmq_msg_data(&msg)),
+                        zmq_msg_size(&msg));
+        zmq_msg_close(&msg);
 
         lexaire::ToolResult result;
         try {
-            json req = json::parse(std::string(buf, n));
+            json req = json::parse(raw);
             lexaire::ToolCall call = lexaire::ToolCall::from_json(req);
 
             // An arm call carrying voice_confirmed=true flips the spoken-arm
@@ -270,7 +278,24 @@ static int run() {
             result = lexaire::ToolResult{"", false, std::string("bad_request: ") + e.what(), json::object()};
         }
         std::string reply = result.to_json().dump();
-        zmq_send(rep, reply.data(), reply.size(), 0);
+        // A REP socket must alternate recv/send; failing to send leaves it
+        // wedged in "must-send" state and every subsequent recv hits EFSM.
+        // Best recovery is to rebuild the socket so the next REQ from the
+        // orchestrator can complete.
+        if (zmq_send(rep, reply.data(), reply.size(), 0) < 0) {
+            std::fprintf(stderr,
+                         "[flight-bridge] zmq_send failed: %s — rebuilding REP\n",
+                         zmq_strerror(zmq_errno()));
+            zmq_close(rep);
+            rep = zmq_socket(zctx, ZMQ_REP);
+            zmq_setsockopt(rep, ZMQ_LINGER, &linger, sizeof(linger));
+            if (zmq_bind(rep, rep_bind.c_str()) != 0) {
+                std::fprintf(stderr,
+                             "[flight-bridge] zmq_bind REP rebuild failed: %s\n",
+                             zmq_strerror(zmq_errno()));
+                break;
+            }
+        }
     }
 
     g_stop.test_and_set();

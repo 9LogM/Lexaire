@@ -30,6 +30,8 @@ target_include_directories(lexaire PRIVATE
     ${ZMQ_INCLUDE_DIRS}
 )
 
+target_compile_options(lexaire PRIVATE -Wall -Wextra -Wpedantic)
+
 target_link_libraries(lexaire PRIVATE
     Boost::system
     Threads::Threads
@@ -49,6 +51,8 @@ target_include_directories(lexaire-flight-bridge PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIRS}
 )
+
+target_compile_options(lexaire-flight-bridge PRIVATE -Wall -Wextra -Wpedantic)
 
 target_link_libraries(lexaire-flight-bridge PRIVATE
     MAVSDK::mavsdk

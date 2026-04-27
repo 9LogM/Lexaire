@@ -317,12 +317,10 @@ class Orchestrator:
                 if result.error == "bridge_offline":
                     offline = True
                     break
-                # Bail when the same (tool, error) pair has appeared
-                # `_STUCK_FAILURE_THRESHOLD` times in the recent history.
-                # Catches the consecutive-identical case (PX4 'Arming
-                # denied' loop) AND oscillation (arm/get_telemetry/arm/
-                # get_telemetry...) without re-prompting Gemini further.
                 if not result.ok and result.error is not None:
+                    # Stuck check: same (tool, error) pair _STUCK_FAILURE_THRESHOLD
+                    # times in trailing _STUCK_FAILURE_WINDOW steps. Catches the
+                    # PX4 'Arming denied' loop and oscillation cases.
                     matches = sum(
                         1 for step in mission.step_history[-_STUCK_FAILURE_WINDOW:]
                         if step["tool"] == tc.name and step["error"] == result.error
@@ -333,6 +331,9 @@ class Orchestrator:
                             tc.name, matches, result.error)
                         stuck = True
                         break
+                    # Otherwise re-prompt the VLM with the fresh failure rather
+                    # than running the rest of a plan that assumed success.
+                    break
                 if tc.name in _TERMINAL_TOOLS:
                     terminal_call = tc.name
                     break

@@ -14,8 +14,7 @@ Channels:
     telemetry         PUB/SUB   header only
     orch.status       PUB/SUB   header only
     orch.command      PUSH/PULL header only  (STT -> orchestrator)
-    flight.tool       REQ/REP   header only
-    flight.result     REQ/REP   header only (reply to tool)
+    flight.toolcall   REQ/REP   ToolCall request -> ToolResult reply
 """
 
 from __future__ import annotations
