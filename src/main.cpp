@@ -609,6 +609,10 @@ int main() {
     const std::string orch_pub_ep  = config.require<std::string>("services.orchestrator_status_pub");
 
     initscr();
+    // Restores the terminal even if io.run() throws.
+    struct EndwinGuard {
+        ~EndwinGuard() { endwin(); }
+    } endwin_guard;
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
@@ -661,6 +665,4 @@ int main() {
     render(ctx);
     start_input_poll(ctx);
     ctx.io.run();
-
-    endwin();
 }

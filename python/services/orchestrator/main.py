@@ -190,20 +190,23 @@ class Orchestrator:
                     is_abort=bool(hdr.get("is_abort", False)),
                 )
                 self.log.info("command: %r (abort=%s)", cmd.text, cmd.is_abort)
-                try:
-                    self.command_q.put_nowait(cmd)
-                except queue.Full:
-                    if cmd.is_abort:
-                        # Abort is the kill path — never drop it; evict oldest.
-                        try:
+                if cmd.is_abort:
+                    # Abort jumps the queue: drain pending commands so the
+                    # next get() returns abort, not the head of the FIFO.
+                    drained = 0
+                    try:
+                        while True:
                             self.command_q.get_nowait()
-                            self.command_q.put_nowait(cmd)
-                            self.log.warning(
-                                "command queue full — evicted oldest for abort")
-                        except (queue.Empty, queue.Full):
-                            self.log.warning(
-                                "command queue churn during abort — dropping")
-                    else:
+                            drained += 1
+                    except queue.Empty:
+                        pass
+                    if drained:
+                        self.log.warning("abort drained %d pending commands", drained)
+                    self.command_q.put_nowait(cmd)
+                else:
+                    try:
+                        self.command_q.put_nowait(cmd)
+                    except queue.Full:
                         self.log.warning("command queue full — dropping")
             except Exception as e:
                 self.log.warning("command decode error: %s", e)
@@ -470,6 +473,14 @@ class Orchestrator:
             with self._bridge_lock:
                 self._bridge_offline_flag = True
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
+        except (zmq.ZMQError, ValueError, TypeError) as e:
+            # Wedged REQ / partial recv / malformed JSON / non-dict reply —
+            # surface as an error so the main loop keeps running.
+            self.log.warning("tool %s wire error: %r", tc.name, e)
+            self._reset_req_socket()
+            return ToolResult(
+                request_id=tc.request_id, ok=False, error=f"wire_error: {e!r}"
+            )
 
     def _publish_status(self, state: str, note: str):
         msg = OrchestratorStatus(
