@@ -22,6 +22,7 @@ import zstandard as zstd
 from PIL import Image
 
 from . import messages as msg
+from . import transport
 
 log = logging.getLogger(__name__)
 
@@ -102,58 +103,53 @@ class SensorSubscriber:
 
     # -- Stream threads -------------------------------------------------------
 
-    def _subscribe(self, endpoint: str) -> zmq.Socket:
-        s = self._ctx.socket(zmq.SUB)
-        s.setsockopt(zmq.SUBSCRIBE, b"")
-        s.setsockopt(zmq.RCVHWM, 8)
-        s.setsockopt(zmq.LINGER, 0)
-        s.setsockopt(zmq.CONNECT_TIMEOUT, 1000)
-        s.connect(endpoint)
-        return s
-
     def _run_rgb(self) -> None:
-        sock = self._subscribe(self.rgb_ep)
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            events = dict(poller.poll(250))
-            if sock not in events:
-                continue
-            try:
-                hdr_bytes, payload = sock.recv_multipart(copy=False)
-                hdr = msg.decode_header(bytes(hdr_bytes))
-                img = np.asarray(Image.open(io.BytesIO(bytes(payload))).convert("RGB"))
-                bgr = img[..., ::-1].copy()
-            except Exception as e:
-                log.warning("rgb decode error: %s", e)
-                continue
-            with self._new_frame:
-                self._rgb_buf[int(hdr["seq"])] = (hdr, bgr)
-                self._trim_locked(self._rgb_buf)
-                self._new_frame.notify()
-        sock.close()
+        sock = transport.sub(self._ctx, self.rgb_ep, connect_timeout_ms=1000)
+        try:
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            while not self._stop.is_set():
+                events = dict(poller.poll(250))
+                if sock not in events:
+                    continue
+                try:
+                    hdr_bytes, payload = sock.recv_multipart(copy=False)
+                    hdr = msg.decode_header(bytes(hdr_bytes))
+                    img = np.asarray(Image.open(io.BytesIO(bytes(payload))).convert("RGB"))
+                    bgr = img[..., ::-1].copy()
+                except Exception as e:
+                    log.warning("rgb decode error: %s", e)
+                    continue
+                with self._new_frame:
+                    self._rgb_buf[int(hdr["seq"])] = (hdr, bgr)
+                    self._trim_locked(self._rgb_buf)
+                    self._new_frame.notify()
+        finally:
+            sock.close()
 
     def _run_depth(self) -> None:
-        sock = self._subscribe(self.depth_ep)
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            events = dict(poller.poll(250))
-            if sock not in events:
-                continue
-            try:
-                hdr_bytes, payload = sock.recv_multipart(copy=False)
-                hdr = msg.decode_header(bytes(hdr_bytes))
-                raw = self._zdecomp.decompress(bytes(payload))
-                depth = np.frombuffer(raw, dtype="<u2").reshape(hdr["h"], hdr["w"])
-            except Exception as e:
-                log.warning("depth decode error: %s", e)
-                continue
-            with self._new_frame:
-                self._depth_buf[int(hdr["seq"])] = (hdr, depth)
-                self._trim_locked(self._depth_buf)
-                self._new_frame.notify()
-        sock.close()
+        sock = transport.sub(self._ctx, self.depth_ep, connect_timeout_ms=1000)
+        try:
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            while not self._stop.is_set():
+                events = dict(poller.poll(250))
+                if sock not in events:
+                    continue
+                try:
+                    hdr_bytes, payload = sock.recv_multipart(copy=False)
+                    hdr = msg.decode_header(bytes(hdr_bytes))
+                    raw = self._zdecomp.decompress(bytes(payload))
+                    depth = np.frombuffer(raw, dtype="<u2").reshape(hdr["h"], hdr["w"])
+                except Exception as e:
+                    log.warning("depth decode error: %s", e)
+                    continue
+                with self._new_frame:
+                    self._depth_buf[int(hdr["seq"])] = (hdr, depth)
+                    self._trim_locked(self._depth_buf)
+                    self._new_frame.notify()
+        finally:
+            sock.close()
 
     # -- Matching -------------------------------------------------------------
 

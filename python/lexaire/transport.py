@@ -3,6 +3,7 @@ caller owns lifetime — no process-wide singleton."""
 
 from __future__ import annotations
 
+from typing import Optional
 from urllib.parse import urlparse
 
 import zmq
@@ -28,11 +29,14 @@ def pub(ctx: zmq.Context, endpoint: str, *, hwm: int = 4) -> zmq.Socket:
 
 
 def sub(ctx: zmq.Context, endpoint: str, *,
-        hwm: int = 8, topic_filter: bytes = b"") -> zmq.Socket:
+        hwm: int = 8, topic_filter: bytes = b"",
+        connect_timeout_ms: Optional[int] = None) -> zmq.Socket:
     s = ctx.socket(zmq.SUB)
     s.setsockopt(zmq.SUBSCRIBE, topic_filter)
     s.setsockopt(zmq.RCVHWM, hwm)
     s.setsockopt(zmq.LINGER, 0)
+    if connect_timeout_ms is not None:
+        s.setsockopt(zmq.CONNECT_TIMEOUT, connect_timeout_ms)
     s.connect(endpoint)
     return s
 
