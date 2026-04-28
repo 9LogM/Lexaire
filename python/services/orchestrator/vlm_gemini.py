@@ -68,36 +68,35 @@ class GeminiVLM(VLM):
 
         parts.append(self._build_prompt(ctx))
 
+        thought_parts: list[str] = []
+        calls: list[ToolCall] = []
+
         try:
             resp = self._client.models.generate_content(
                 model=self._model_name,
                 contents=parts,
                 config=self._config,
             )
+            for candidate in getattr(resp, "candidates", []) or []:
+                content = getattr(candidate, "content", None)
+                if content is None:
+                    continue
+                for part in getattr(content, "parts", []) or []:
+                    fn = getattr(part, "function_call", None)
+                    if fn is not None:
+                        args = dict(fn.args) if fn.args is not None else {}
+                        calls.append(ToolCall(
+                            request_id=self.new_request_id(),
+                            name=str(fn.name),
+                            args=args,
+                        ))
+                        continue
+                    text = getattr(part, "text", None)
+                    if text:
+                        thought_parts.append(str(text))
         except Exception as e:
             log.exception("Gemini call failed: %s", e)
             return VlmDecision(thought=f"vlm_error: {e}", tool_calls=[])
-
-        thought_parts: list[str] = []
-        calls: list[ToolCall] = []
-
-        for candidate in getattr(resp, "candidates", []) or []:
-            content = getattr(candidate, "content", None)
-            if content is None:
-                continue
-            for part in getattr(content, "parts", []) or []:
-                fn = getattr(part, "function_call", None)
-                if fn is not None:
-                    args = dict(fn.args) if fn.args is not None else {}
-                    calls.append(ToolCall(
-                        request_id=self.new_request_id(),
-                        name=str(fn.name),
-                        args=args,
-                    ))
-                    continue
-                text = getattr(part, "text", None)
-                if text:
-                    thought_parts.append(str(text))
 
         thought = " ".join(thought_parts).strip() or "(no text)"
         return VlmDecision(thought=thought, tool_calls=calls)

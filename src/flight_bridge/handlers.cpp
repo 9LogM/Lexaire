@@ -1,9 +1,7 @@
 #include "handlers.hpp"
 
-#include <chrono>
 #include <cstdio>
 #include <string>
-#include <thread>
 
 using namespace mavsdk;
 using lexaire::json;
@@ -244,7 +242,7 @@ ToolResult handle_get_param(const ToolCall& c, FlightCtx& ctx) {
     if (r2 == Param::Result::Success) {
         return ok(c.request_id, json{{"float_value", v2}});
     }
-    return err(c.request_id, "param_get_failed:" + param_result_to_string(r));
+    return err(c.request_id, "param_get_failed:" + param_result_to_string(r2));
 }
 
 // Operator-only diagnostic: dump MAVSDK's pre-arm health flags.

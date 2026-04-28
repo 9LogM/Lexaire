@@ -195,7 +195,7 @@ class Orchestrator:
                     is_abort=bool(hdr.get("is_abort", False)),
                 )
                 self.log.info("command: %r (abort=%s)", cmd.text, cmd.is_abort)
-                self.command_q.put(cmd, timeout=0.5)
+                self.command_q.put_nowait(cmd)
             except queue.Full:
                 self.log.warning("command queue full — dropping")
             except Exception as e:

@@ -175,9 +175,9 @@ static int run() {
             std::fprintf(stderr,
                          "[flight-bridge] heartbeat lost %.1fs — issuing %s\n",
                          age_s, hb_action.c_str());
-            mavsdk::Action::Result r = mavsdk::Action::Result::Unknown;
-            if (hb_action == "hold")      r = ctx.action->hold();
-            else                          r = ctx.action->return_to_launch();
+            const auto r = (hb_action == "hold")
+                ? ctx.action->hold()
+                : ctx.action->return_to_launch();
             std::fprintf(stderr, "[flight-bridge] heartbeat-loss %s -> %s\n",
                          hb_action.c_str(),
                          r == mavsdk::Action::Result::Success ? "ok" : "failed");
@@ -289,6 +289,12 @@ static int run() {
                          zmq_strerror(zmq_errno()));
             zmq_close(rep);
             rep = zmq_socket(zctx, ZMQ_REP);
+            if (rep == nullptr) {
+                std::fprintf(stderr,
+                             "[flight-bridge] zmq_socket REP rebuild failed: %s\n",
+                             zmq_strerror(zmq_errno()));
+                break;
+            }
             zmq_setsockopt(rep, ZMQ_LINGER, &linger, sizeof(linger));
             if (zmq_bind(rep, rep_bind.c_str()) != 0) {
                 std::fprintf(stderr,
@@ -302,7 +308,7 @@ static int run() {
     g_stop.test_and_set();
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
     if (tele_thread.joinable()) tele_thread.join();
-    zmq_close(rep);
+    if (rep) zmq_close(rep);
     zmq_close(pub);
     zmq_ctx_destroy(zctx);
     std::fprintf(stderr, "[flight-bridge] shutdown complete\n");
