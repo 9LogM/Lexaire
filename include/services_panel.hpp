@@ -26,7 +26,8 @@ struct ServicesSnapshot {
     // One-line summaries from the most recent message on each channel.
     std::string perception_summary;
     std::string telemetry_summary;
-    // "idle" | "thinking" | "executing" | "aborted" | "bridge_offline" | "vlm_error"
+    // "idle" | "thinking" | "executing" | "aborted" | "abort_failed"
+    //  | "bridge_offline" | "vlm_error"
     std::string orch_state;
     std::string orch_thought;
 

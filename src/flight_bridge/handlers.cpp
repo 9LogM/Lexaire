@@ -163,9 +163,9 @@ ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
 // ---- Operator-only handlers ----
 // The dispatch table includes the handlers below, but tool_schemas() in
 // python/services/orchestrator/tools.py does NOT, so the VLM can't reach
-// them. They're the bridge's REPL surface for human operators talking to
-// the REQ socket directly (e.g. via a debug script). Do not expose to the
-// VLM without thinking through safety implications first.
+// them. They're the bridge's escape hatch for talking to the REQ socket
+// directly. Do not add to tool_schemas() without thinking through the
+// safety implications.
 
 ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     std::string name = c.args.value("name", "");

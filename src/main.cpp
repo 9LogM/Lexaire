@@ -266,7 +266,8 @@ static void render(const AppContext& ctx) {
         // orchestrator itself is publishing healthily.
         const bool bridge_offline = (snap.orch_state == "bridge_offline");
         const bool vlm_error     = (snap.orch_state == "vlm_error");
-        const bool orch_alarm    = bridge_offline || vlm_error;
+        const bool abort_failed  = (snap.orch_state == "abort_failed");
+        const bool orch_alarm    = bridge_offline || vlm_error || abort_failed;
 
         auto row = [&](const char* name, long long ms, const std::string& detail,
                         int forced_pair = 0) {
@@ -298,6 +299,10 @@ static void render(const AppContext& ctx) {
         } else if (vlm_error) {
             attron(COLOR_PAIR(3) | A_BOLD);
             mvprintw(r++, 4, ">> VLM ERROR - check API key, quota, network");
+            attroff(COLOR_PAIR(3) | A_BOLD);
+        } else if (abort_failed) {
+            attron(COLOR_PAIR(3) | A_BOLD);
+            mvprintw(r++, 4, ">> ABORT REJECTED - drone may still be in air");
             attroff(COLOR_PAIR(3) | A_BOLD);
         }
 

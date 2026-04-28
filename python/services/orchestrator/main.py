@@ -279,11 +279,17 @@ class Orchestrator:
                 name="abort",
                 args={},
             ))
-            if not result.ok and self._bridge_offline():
-                self._publish_status(
-                    "bridge_offline",
-                    f"abort {cmd.text!r} did not reach the flight bridge",
-                )
+            if not result.ok:
+                if self._bridge_offline():
+                    self._publish_status(
+                        "bridge_offline",
+                        f"abort {cmd.text!r} did not reach the flight bridge",
+                    )
+                else:
+                    self._publish_status(
+                        "abort_failed",
+                        f"abort rejected by bridge: {result.error}",
+                    )
             return
 
         max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))
