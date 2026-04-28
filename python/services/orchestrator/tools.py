@@ -101,9 +101,4 @@ def tool_schemas() -> list[dict[str, Any]]:
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
-        {
-            "name": "get_telemetry",
-            "description": "Return the current telemetry snapshot (position, attitude, mode, battery).",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
     ]

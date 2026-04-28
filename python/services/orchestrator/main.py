@@ -318,21 +318,18 @@ class Orchestrator:
                     offline = True
                     break
                 if not result.ok and result.error is not None:
-                    # Stuck check: same (tool, error) pair _STUCK_FAILURE_THRESHOLD
-                    # times in trailing _STUCK_FAILURE_WINDOW steps. Catches the
-                    # PX4 'Arming denied' loop and oscillation cases.
                     matches = sum(
                         1 for step in mission.step_history[-_STUCK_FAILURE_WINDOW:]
                         if step["tool"] == tc.name and step["error"] == result.error
                     )
+                    # End the mission once the VLM is stuck on a loop it can't
+                    # escape on its own (canonical case: PX4 'Arming denied').
                     if matches >= _STUCK_FAILURE_THRESHOLD:
                         self.log.warning(
                             "mission stuck: %s failed %d times with %r; bailing",
                             tc.name, matches, result.error)
                         stuck = True
                         break
-                    # Otherwise re-prompt the VLM with the fresh failure rather
-                    # than running the rest of a plan that assumed success.
                     break
                 if tc.name in _TERMINAL_TOOLS:
                     terminal_call = tc.name

@@ -46,7 +46,7 @@ struct AppContext {
 
     std::unique_ptr<ServicesWatcher>  services_watcher;
 
-    boost::asio::steady_timer    stack_timer;    // periodic re-check of GCS stack state
+    boost::asio::steady_timer    stack_timer;
 
     AppContext()
         : signals(io, SIGINT, SIGTERM)
@@ -565,8 +565,6 @@ static void ensure_relay_running(AppContext& ctx) {
 }
 
 static void refresh_stack_state(AppContext& ctx) {
-    // `lexaire` is build-only and `tools` profile services aren't part of the
-    // running stack — match only the long-running core trio.
     std::string cmd = ps_query_shell(
         "",
         "--filter name=lexaire-perception "
@@ -576,7 +574,7 @@ static void refresh_stack_state(AppContext& ctx) {
         ctx.io,
         [&ctx](boost::system::error_code, int exit_code) {
             const ServiceState next = exit_to_state(exit_code);
-            // Don't overwrite a Deploying state mid-restart.
+            // Don't clobber a Deploying state mid-restart.
             if (ctx.stack_state != ServiceState::Deploying) {
                 ctx.stack_state = next;
                 request_render(ctx);
@@ -642,8 +640,7 @@ int main() {
     };
     refresh_tick();
 
-    // docker ps every 500ms would be wasteful; 3s is fast enough that the
-    // header tracks stack state when it's started/stopped outside the TUI.
+    // Slower than the 500ms render tick — docker ps every frame is wasteful.
     std::function<void()> stack_tick;
     stack_tick = [&ctx, &stack_tick]() {
         refresh_stack_state(ctx);

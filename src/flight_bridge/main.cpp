@@ -211,10 +211,17 @@ static int run() {
                 t.battery_v = b.voltage_v;
             }
             auto p = ctx.telemetry->position();
-            t.lat = p.latitude_deg;
-            t.lon = p.longitude_deg;
-            t.abs_alt_m = p.absolute_altitude_m;
-            t.rel_alt_m = p.relative_altitude_m;
+            if (std::isfinite(p.latitude_deg) && std::isfinite(p.longitude_deg) &&
+                (p.latitude_deg != 0.0 || p.longitude_deg != 0.0)) {
+                t.lat = p.latitude_deg;
+                t.lon = p.longitude_deg;
+            }
+            if (std::isfinite(p.absolute_altitude_m)) {
+                t.abs_alt_m = p.absolute_altitude_m;
+            }
+            if (std::isfinite(p.relative_altitude_m)) {
+                t.rel_alt_m = p.relative_altitude_m;
+            }
             auto a = ctx.telemetry->attitude_euler();
             t.roll_deg = a.roll_deg;
             t.pitch_deg = a.pitch_deg;
@@ -233,8 +240,7 @@ static int run() {
         int rc = zmq_poll(items, 1, 250);
         if (rc <= 0) continue;
 
-        // zmq_msg_t auto-sizes; a fixed buffer would silently truncate any
-        // tool call larger than the buffer.
+        // zmq_msg_t auto-sizes — a fixed buffer would silently truncate.
         zmq_msg_t msg;
         zmq_msg_init(&msg);
         int n = zmq_msg_recv(&msg, rep, 0);
@@ -278,10 +284,8 @@ static int run() {
             result = lexaire::ToolResult{"", false, std::string("bad_request: ") + e.what(), json::object()};
         }
         std::string reply = result.to_json().dump();
-        // A REP socket must alternate recv/send; failing to send leaves it
-        // wedged in "must-send" state and every subsequent recv hits EFSM.
-        // Best recovery is to rebuild the socket so the next REQ from the
-        // orchestrator can complete.
+        // A failed send wedges the REP socket in "must-send" state — every
+        // subsequent recv returns EFSM. Rebuild to recover.
         if (zmq_send(rep, reply.data(), reply.size(), 0) < 0) {
             std::fprintf(stderr,
                          "[flight-bridge] zmq_send failed: %s — rebuilding REP\n",
