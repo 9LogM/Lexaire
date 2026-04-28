@@ -257,27 +257,24 @@ static int run() {
             json req = json::parse(raw);
             lexaire::ToolCall call = lexaire::ToolCall::from_json(req);
 
-            // An arm call carrying voice_confirmed=true flips the spoken-arm
-            // gate before safety runs. The orchestrator is the only producer
-            // of tool calls and it only runs in response to a voice command,
-            // so any arm that reaches here is by construction voice-spoken.
-            // The flag persists until disarm so takeoff can follow the same
-            // armed session — fresh arm next flight requires fresh voice.
-            if (call.name == "arm" && call.args.value("voice_confirmed", false)) {
-                state.armed_with_voice.store(true);
-            }
-
             auto gate = lexaire::check_tool(call.name, call.args, env, state);
             if (!gate.allow) {
                 result = lexaire::ToolResult{call.request_id, false, "safety_denied: " + gate.reason, json::object()};
             } else {
                 result = lexaire::dispatch(call, ctx);
-                if (call.name == "disarm" && result.ok) {
-                    // Disarm closes the flight session: clear the spoken-arm
-                    // gate AND the abort latch so the next session can arm
-                    // again without bouncing off "abort_active".
-                    state.armed_with_voice.store(false);
-                    state.aborted.store(false);
+                if (result.ok) {
+                    // Commit the spoken-arm latch only after PX4 armed — a
+                    // denied arm must not leave the gate hot.
+                    if (call.name == "arm" &&
+                        call.args.value("voice_confirmed", false)) {
+                        state.armed_with_voice.store(true);
+                    }
+                    if (call.name == "disarm") {
+                        // End-of-flight: clear both latches so the next
+                        // session can arm without bouncing off "abort_active".
+                        state.armed_with_voice.store(false);
+                        state.aborted.store(false);
+                    }
                 }
             }
         } catch (const std::exception& e) {

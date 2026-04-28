@@ -117,8 +117,7 @@ class Orchestrator:
         self.latest_fs = None
         self.latest_fs_lock = threading.Lock()
 
-        # command_pull is bound inside _run_command_thread.
-        self.command_pull = None
+        self.command_pull = transport.pull(self._zmq, cfg.require("services.orchestrator_command_pull"))
         self.status_pub = transport.pub(self._zmq, cfg.require("services.orchestrator_status_pub"))
         self.scene_sub  = transport.sub(self._zmq, cfg.require("services.perception_scene_pub"))
         self.telem_sub  = transport.sub(self._zmq, cfg.require("services.telemetry_pub"))
@@ -181,16 +180,14 @@ class Orchestrator:
     # -- Sockets --------------------------------------------------------------
 
     def _run_command_thread(self):
-        pull = transport.pull(self._zmq, self.cfg.require("services.orchestrator_command_pull"))
-        self.command_pull = pull
         poller = zmq.Poller()
-        poller.register(pull, zmq.POLLIN)
+        poller.register(self.command_pull, zmq.POLLIN)
         while not self.stop_event.is_set():
             events = dict(poller.poll(250))
-            if pull not in events:
+            if self.command_pull not in events:
                 continue
             try:
-                frame = pull.recv()
+                frame = self.command_pull.recv()
                 hdr = decode_header(frame)
                 cmd = VoiceCommand(
                     ts_ns=int(hdr.get("ts_ns", now_ns())),
@@ -270,11 +267,16 @@ class Orchestrator:
 
         if cmd.is_abort or self._abort_pattern.search(cmd.text):
             self._publish_status("aborted", f"abort keyword: {cmd.text!r}")
-            self._dispatch_tool_call(ToolCall(
+            result = self._dispatch_tool_call(ToolCall(
                 request_id=VLM.new_request_id(),
                 name="abort",
                 args={},
             ))
+            if not result.ok and self._bridge_offline():
+                self._publish_status(
+                    "bridge_offline",
+                    f"abort {cmd.text!r} did not reach the flight bridge",
+                )
             return
 
         max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))

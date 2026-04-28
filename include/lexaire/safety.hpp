@@ -55,7 +55,14 @@ inline SafetyDecision check_tool(const std::string& name,
         return {false, "abort_active"};
     }
 
-    if ((name == "arm" || name == "takeoff") &&
+    // arm gates on the call's own voice_confirmed so the state latch can be
+    // committed post-dispatch (a denied arm must not leave it hot).
+    if (name == "arm" &&
+        env.require_spoken_arm && !state.armed_with_voice.load() &&
+        !args.value("voice_confirmed", false)) {
+        return {false, "spoken_arm_required"};
+    }
+    if (name == "takeoff" &&
         env.require_spoken_arm && !state.armed_with_voice.load()) {
         return {false, "spoken_arm_required"};
     }

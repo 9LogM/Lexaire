@@ -4,10 +4,11 @@ Wire format between Lexaire services.
 All messages are ZMQ multipart. Frame 0 is a UTF-8 JSON header; frame 1, when
 present, is a binary payload.
 
-Channels:
+Channels (all sensor.* channels emit a 2-frame multipart so consumers
+can recv_multipart uniformly; IMU's payload frame is empty):
     sensor.rgb        PUB/SUB   header + jpeg bytes
     sensor.depth      PUB/SUB   header + zstd(z16 LE) bytes
-    sensor.imu        PUB/SUB   header only (accel + gyro samples in JSON)
+    sensor.imu        PUB/SUB   header (accel + gyro samples in JSON) + empty
     sensor.infrared   PUB/SUB   header + zstd(y8) bytes
     sensor.confidence PUB/SUB   header + zstd(raw8) bytes
     perception.scene  PUB/SUB   header only (JSON contains the detection list)

@@ -161,6 +161,11 @@ class SensorSubscriber:
         while not self._stop.is_set():
             with self._new_frame:
                 matched = self._try_match_locked()
+                if not matched:
+                    # Wait inside the lock — a notify between unlock and
+                    # wait would otherwise be lost.
+                    self._new_frame.wait(timeout=0.1)
+                    matched = self._try_match_locked()
             for fs in matched:
                 try:
                     self._out.put(fs, timeout=0.1)
@@ -174,8 +179,6 @@ class SensorSubscriber:
                     except (queue.Empty, queue.Full) as e:
                         log.warning("frameset queue churn (seq=%d): %s; frame dropped",
                                     fs.seq, e.__class__.__name__)
-            with self._new_frame:
-                self._new_frame.wait(timeout=0.1)
 
     def _try_match_locked(self) -> list[Frameset]:
         out: list[Frameset] = []
