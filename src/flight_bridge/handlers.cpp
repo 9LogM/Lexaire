@@ -139,8 +139,11 @@ ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
 // Pilot-voice safe-stop: controlled descent and disarm-on-touchdown.
 // For an instant motor-cut, see `handle_kill`.
 ToolResult handle_abort(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.safety) ctx.safety->aborted.store(true);
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
+    // Skip the latch on the ground — no armed falling-edge to clear it,
+    // so it would block the next legitimate arm with abort_active.
+    const bool in_air = ctx.telemetry && ctx.telemetry->in_air();
+    if (in_air && ctx.safety) ctx.safety->aborted.store(true);
     auto r = ctx.action->land();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
@@ -149,8 +152,9 @@ ToolResult handle_abort(const ToolCall& c, FlightCtx& ctx) {
 // Instant motor cut. Reserved for emergencies where a controlled descent
 // is unsafe (e.g. drone about to strike a person).
 ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.safety) ctx.safety->aborted.store(true);
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
+    const bool in_air = ctx.telemetry && ctx.telemetry->in_air();
+    if (in_air && ctx.safety) ctx.safety->aborted.store(true);
     auto r = ctx.action->kill();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
@@ -237,6 +241,11 @@ ToolResult handle_get_param(const ToolCall& c, FlightCtx& ctx) {
     auto [r, v] = ctx.param->get_param_int(name);
     if (r == Param::Result::Success) {
         return ok(c.request_id, json{{"int_value", v}});
+    }
+    // Only fall through on type mismatch — a timeout / connection error
+    // would otherwise be masked by the float retry.
+    if (r != Param::Result::WrongType) {
+        return err(c.request_id, "param_get_failed:" + param_result_to_string(r));
     }
     auto [r2, v2] = ctx.param->get_param_float(name);
     if (r2 == Param::Result::Success) {

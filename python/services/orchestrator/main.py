@@ -134,11 +134,6 @@ class Orchestrator:
         self._bridge_offline_flag = False
         self._bridge_lock = threading.Lock()
 
-        # _publish_status is currently called only from the main thread, but
-        # this lock guards against a future call site introduced from a
-        # worker thread — PyZMQ sockets are not safe for concurrent send().
-        self._status_lock = threading.Lock()
-
         # Lazy REQ socket; recycled on timeout because REQ doesn't tolerate
         # a missed recv (strict send/recv state machine).
         self._req_socket: Optional[zmq.Socket] = None
@@ -195,9 +190,21 @@ class Orchestrator:
                     is_abort=bool(hdr.get("is_abort", False)),
                 )
                 self.log.info("command: %r (abort=%s)", cmd.text, cmd.is_abort)
-                self.command_q.put_nowait(cmd)
-            except queue.Full:
-                self.log.warning("command queue full — dropping")
+                try:
+                    self.command_q.put_nowait(cmd)
+                except queue.Full:
+                    if cmd.is_abort:
+                        # Abort is the kill path — never drop it; evict oldest.
+                        try:
+                            self.command_q.get_nowait()
+                            self.command_q.put_nowait(cmd)
+                            self.log.warning(
+                                "command queue full — evicted oldest for abort")
+                        except (queue.Empty, queue.Full):
+                            self.log.warning(
+                                "command queue churn during abort — dropping")
+                    else:
+                        self.log.warning("command queue full — dropping")
             except Exception as e:
                 self.log.warning("command decode error: %s", e)
 
@@ -316,7 +323,7 @@ class Orchestrator:
                     break
                 result = self._dispatch_tool_call(tc)
                 mission.record(tc.name, dict(tc.args or {}), result)
-                if result.error == "bridge_offline":
+                if result.error in ("bridge_offline", "timeout"):
                     offline = True
                     break
                 if not result.ok and result.error is not None:
@@ -464,14 +471,13 @@ class Orchestrator:
             state=state,
             last_thought=note,
         )
-        with self._status_lock:
-            try:
-                self.status_pub.send(encode_header(msg))
-            except zmq.ZMQError as e:
-                # Status PUB is non-load-bearing for control flow, but a
-                # send failure here means the TUI has stopped seeing us —
-                # surface rather than swallow.
-                self.log.warning("status_pub send failed (%s): %r", e, msg)
+        try:
+            self.status_pub.send(encode_header(msg))
+        except zmq.ZMQError as e:
+            # Status PUB is non-load-bearing for control flow, but a
+            # send failure here means the TUI has stopped seeing us —
+            # surface rather than swallow.
+            self.log.warning("status_pub send failed (%s): %r", e, msg)
 
 
 def cli() -> int:
