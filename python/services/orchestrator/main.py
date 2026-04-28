@@ -91,6 +91,7 @@ class Orchestrator:
         self.stop_event = threading.Event()
         self.command_q: queue.Queue[VoiceCommand] = queue.Queue(maxsize=16)
         self.history: list[str] = []
+        self._threads: list[threading.Thread] = []
 
         self.latest_scene: dict = {}
         self.latest_scene_lock = threading.Lock()
@@ -153,7 +154,6 @@ class Orchestrator:
 
     def start(self):
         self.sub.start()
-        self._threads: list[threading.Thread] = []
         self._spawn(self._run_command_thread,   "orch-command")
         self._spawn(self._run_scene_thread,     "orch-scene")
         self._spawn(self._run_telemetry_thread, "orch-telem")

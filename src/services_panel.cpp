@@ -186,10 +186,11 @@ void ServicesWatcher::run() {
     void* telem = mksub(telem_ep_);
     void* orch  = mksub(orch_ep_);
 
+    // fd=-1 on null sockets so zmq_poll skips them; fd=0 would poll stdin.
     std::array<zmq_pollitem_t, 3> items{{
-        {scene, 0, ZMQ_POLLIN, 0},
-        {telem, 0, ZMQ_POLLIN, 0},
-        {orch,  0, ZMQ_POLLIN, 0},
+        {scene, scene ? 0 : -1, ZMQ_POLLIN, 0},
+        {telem, telem ? 0 : -1, ZMQ_POLLIN, 0},
+        {orch,  orch  ? 0 : -1, ZMQ_POLLIN, 0},
     }};
 
     while (!stop_.load(std::memory_order_relaxed)) {

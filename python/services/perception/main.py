@@ -98,6 +98,8 @@ def cli() -> int:
             log.debug("scene ts_ns=%d seq=%d n=%d", header.ts_ns, header.frame_seq, len(header.detections))
 
             if args.once:
+                # Default LINGER=0 would drop the single message on close.
+                pub.setsockopt(zmq.LINGER, 500)
                 break
     finally:
         sub.stop()
