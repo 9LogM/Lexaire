@@ -67,7 +67,11 @@ private:
     }
 
     YAML::Node traverse(const std::string& dotted) const {
-        YAML::Node cur = YAML::Clone(root_);
+        // YAML::Node has reference semantics — re-binding `cur` to a
+        // child doesn't mutate root_. The previous YAML::Clone(root_)
+        // deep-copied the entire tree on every traverse() (i.e. on
+        // every require<T>() / get_or<T>()), pure waste.
+        YAML::Node cur = root_;
         std::size_t start = 0;
         while (start <= dotted.size()) {
             std::size_t dot = dotted.find('.', start);

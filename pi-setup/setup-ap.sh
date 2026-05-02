@@ -84,7 +84,11 @@ ip_only="${ip_cidr%/*}"
 echo
 echo "AP up on $IFACE."
 echo "  SSID:     $SSID"
-echo "  Password: $PASSWORD"
+# Don't echo $PASSWORD: this script is invoked over SSH from the GCS,
+# so stdout lands in the operator's SSH client log + scrollback + the
+# Pi's journal. The operator already chose the PSK; printing it back
+# is a leak channel. Show only the length so it's clear it took.
+echo "  Password: (set; ${#PASSWORD} chars)"
 echo "  Pi IP:    ${ip_only:-<none yet>}"
 echo
 echo "Ground station: join SSID '$SSID', then set Lexaire's drone hostname"

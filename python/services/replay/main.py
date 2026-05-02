@@ -81,8 +81,8 @@ def _run_record(cfg, args, log, stop: threading.Event) -> int:
 
     log.info("recording -> %s (Ctrl-C to stop)", args.path)
     count = 0
-    start = time.monotonic_ns()
-    deadline_ns = start + int(args.max_seconds * 1e9) if args.max_seconds > 0 else 0
+    deadline_ns = (time.monotonic_ns() + int(args.max_seconds * 1e9)
+                   if args.max_seconds > 0 else 0)
 
     try:
         with open(args.path, "w", encoding="utf-8") as fp:
@@ -96,7 +96,14 @@ def _run_record(cfg, args, log, stop: threading.Event) -> int:
                         parts = sock.recv_multipart()
                         if len(parts) < 2:
                             continue
-                        header = json.loads(parts[0].decode("utf-8"))
+                        # A single malformed header from the publisher must
+                        # not take the whole recording down — verify_publisher
+                        # already guards this; mirror it on the record path.
+                        try:
+                            header = json.loads(parts[0].decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                            log.warning("malformed %s header: %s", name, e)
+                            continue
                         rec = Record(
                             channel=name,
                             ts_ns=time.monotonic_ns(),

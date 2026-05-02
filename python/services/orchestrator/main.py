@@ -142,7 +142,15 @@ class Orchestrator:
         # Word-boundary match so "laboratory" / "abortive" don't trip the
         # abort path. STT also flags is_abort up front; this is the
         # belt-and-suspenders check on text we receive directly.
-        abort_kw = cfg.get("stt.abort_keyword", "abort")
+        # Guard against empty/whitespace abort_keyword: an empty string
+        # would compile to `\b\b`, which matches every word boundary,
+        # turning every voice command into is_abort=True.
+        abort_kw = cfg.get("stt.abort_keyword", "abort").strip()
+        if not abort_kw:
+            raise ValueError(
+                "stt.abort_keyword is empty/whitespace — would treat every "
+                "command as abort. Set a non-empty keyword in config.yaml."
+            )
         self._abort_pattern = re.compile(
             rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
 
@@ -236,8 +244,10 @@ class Orchestrator:
                         self.command_q.put_nowait(cmd)
                     except queue.Full:
                         self.log.warning("command queue full — dropping")
-            except Exception as e:
-                self.log.warning("command decode error: %s", e)
+            except Exception:
+                # log.exception preserves traceback so a malformed payload
+                # is debuggable; .warning('%s', e) loses the stack.
+                self.log.exception("command decode error")
 
     def _run_scene_thread(self):
         poller = zmq.Poller()
@@ -251,8 +261,8 @@ class Orchestrator:
                 hdr = decode_header(frame)
                 with self.latest_scene_lock:
                     self.latest_scene = hdr
-            except Exception as e:
-                self.log.warning("scene decode error: %s", e)
+            except Exception:
+                self.log.exception("scene decode error")
 
     def _run_telemetry_thread(self):
         poller = zmq.Poller()
@@ -274,8 +284,8 @@ class Orchestrator:
                     cutoff = now - self._telem_history_s
                     while self._telem_history and self._telem_history[0][0] < cutoff:
                         self._telem_history.popleft()
-            except Exception as e:
-                self.log.warning("telem decode error: %s", e)
+            except Exception:
+                self.log.exception("telem decode error")
 
     def _run_frame_thread(self):
         while not self.stop_event.is_set():
@@ -377,7 +387,18 @@ class Orchestrator:
                 self.log.info("VLM call abandoned (preempt or shutdown)")
                 preempted = True
                 break
-            decision = fut.result()
+            # fut.result() re-raises any exception thrown inside vlm.decide.
+            # Backends should self-handle quota / network / parse errors and
+            # return a vlm_error: VlmDecision; an unexpected raise here
+            # would otherwise propagate to run() and kill the orchestrator
+            # main thread, with worker threads still alive queueing commands
+            # nobody dispatches.
+            try:
+                decision = fut.result()
+            except Exception as e:
+                self.log.exception("VLM decide() raised unhandled: %s", e)
+                vlm_error = f"vlm_error: {e!r}"
+                break
             decision_count += 1
             self.log.info("%s decision: %s -> %d tool_calls",
                           step_label, decision.thought, len(decision.tool_calls))
@@ -429,7 +450,13 @@ class Orchestrator:
             if terminal_call is not None or offline or stuck:
                 break
 
-        if preempted:
+        # Order matters: stop_event takes precedence over the no-flags
+        # fallthroughs below, otherwise a SIGTERM mid-batch reports
+        # "no_tool_calls" or "max_decisions=N" depending on where the
+        # outer-loop budget was at, which is misleading.
+        if self.stop_event.is_set():
+            end_reason = "stopped"
+        elif preempted:
             end_reason = "preempted"
         elif terminal_call:
             end_reason = f"terminal:{terminal_call}"
@@ -545,6 +572,12 @@ class Orchestrator:
             }).encode("utf-8"))
             reply = req.recv()
             data = json.loads(reply.decode("utf-8"))
+            # The bridge always replies with a JSON object, but a wire-level
+            # bug (or someone connecting another producer to the REP socket)
+            # could send a list/string. data.get on those raises
+            # AttributeError, which the catch-block widened.
+            if not isinstance(data, dict):
+                raise TypeError(f"non-dict reply: {type(data).__name__}")
             result = ToolResult(
                 request_id=data.get("request_id", tc.request_id),
                 ok=bool(data.get("ok", False)),

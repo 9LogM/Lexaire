@@ -47,7 +47,14 @@ class SttService:
         self._whisper = None
 
         # Word-boundary so "laboratory"/"abortive" don't trip the abort flag.
+        # Empty/whitespace keyword would compile to `\b\b`, which matches
+        # every word boundary — every voice command would become is_abort.
         abort_kw = cfg.get("stt.abort_keyword", "abort").strip()
+        if not abort_kw:
+            raise ValueError(
+                "stt.abort_keyword is empty/whitespace — would flag every "
+                "command as abort. Set a non-empty keyword in config.yaml."
+            )
         self._abort_pattern = re.compile(
             rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
         self._zmq = zmq.Context()

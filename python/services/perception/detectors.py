@@ -39,6 +39,13 @@ def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
     if depth is None or depth.size == 0 or depth_scale_m <= 0.0:
         return None, None
 
+    # Original bbox center, NOT the clamped-patch center. For partial
+    # off-frame detections the patch is shrunken to image bounds; the
+    # ray we back-project should still point at where the object's
+    # actual center is, otherwise xyz drifts toward the image edge.
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+
     x0 = max(0, int(x))
     y0 = max(0, int(y))
     x1 = min(depth.shape[1], int(x + w))
@@ -59,8 +66,6 @@ def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
     if fx <= 0 or fy <= 0:
         return z_m, None
 
-    cx = x0 + (x1 - x0) / 2.0
-    cy = y0 + (y1 - y0) / 2.0
     X = (cx - ppx) * z_m / fx
     Y = (cy - ppy) * z_m / fy
     return z_m, [X, Y, z_m]

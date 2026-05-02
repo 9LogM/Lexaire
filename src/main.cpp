@@ -446,8 +446,21 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 // Force-redeploy of the relay on the Pi. Useful when
                 // relay/ scripts changed locally and you want them picked
                 // up, or when the running relay container has gone wedged.
-                // The up-to-date check inside ensure_relay_running treats
-                // a running relay as final, so this path bypasses it.
+                //
+                // Re-entry guard mirrors case 6: deploy is async on the
+                // io_context, so a second press while one is in flight
+                // would spawn a parallel SSH session racing for the same
+                // remote build context.
+                if (ctx.relay_state == ServiceState::Deploying) {
+                    ctx.sub_content =
+                        "  RESTART RELAY\n\n"
+                        "  A deploy is already in progress. Wait for it\n"
+                        "  to finish before retrying.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
+                }
                 run_deploy(ctx, &ctx.relay_state,
                     "RESTART RELAY",
                     "Redeploying - may take a few minutes if the image rebuilds...",
@@ -497,6 +510,16 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 // Rebuild and restart the local GCS stack containers
                 // (perception, orchestrator, flight-bridge). Picks up
                 // code changes without dropping to the host shell.
+                if (ctx.stack_state == ServiceState::Deploying) {
+                    ctx.sub_content =
+                        "  RESTART GCS STACK\n\n"
+                        "  A restart is already in progress. Wait for it\n"
+                        "  to finish before retrying.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
+                }
                 run_deploy(ctx, &ctx.stack_state,
                     "RESTART GCS STACK",
                     "Rebuilding and restarting local services...",
@@ -716,11 +739,19 @@ static void ensure_relay_running(AppContext& ctx) {
 }
 
 static void refresh_stack_state(AppContext& ctx) {
-    std::string cmd = ps_query_shell(
-        "",
-        "--filter name=lexaire-perception "
-        "--filter name=lexaire-orchestrator "
-        "--filter name=lexaire-flight-bridge");
+    // `docker ps --filter name=A --filter name=B --filter name=C` is OR,
+    // not AND — the previous one-shot query reported Up whenever ANY of
+    // the three GCS containers was running. Run the query per-container
+    // and fail early if any one is missing or the daemon's unreachable.
+    // Exit codes match ps_query_shell's contract: 0 Up / 1 Down / 2 Unknown.
+    std::string cmd =
+        " for n in lexaire-perception lexaire-orchestrator lexaire-flight-bridge; do"
+        "   out=$(docker ps -q --filter name=$n 2>>" + std::string(TUI_LOG_PATH) + ");"
+        "   rc=$?;"
+        "   if [ \"$rc\" -ne 0 ]; then exit 2; fi;"
+        "   if [ -z \"$out\" ]; then exit 1; fi;"
+        " done;"
+        " exit 0";
     boost::process::async_system(
         ctx.io,
         [&ctx](boost::system::error_code, int exit_code) {

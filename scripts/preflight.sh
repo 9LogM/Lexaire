@@ -12,7 +12,11 @@
 #   0  every check passed (or only [WARN])
 #   1  at least one [FAIL]
 
-set -u
+set -uo pipefail
+# Not -e: this script intentionally continues past individual [FAIL]
+# checks so the operator gets the full failure list in one run, not
+# stop-at-first-error. The summary block at the bottom translates
+# any FAIL=1 into the script's exit code.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

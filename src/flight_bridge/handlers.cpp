@@ -141,8 +141,11 @@ ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
-    // At least one of vx/vy/vz must be present; an all-zero/no-arg call
-    // would override an active autonomous mode with a hover setpoint.
+    // At least one of vx/vy/vz must be PRESENT in the args. The check
+    // is "all three absent", not "all three zero" — an explicit
+    // {vx:0, vy:0, vz:0} is a legitimate hover setpoint the operator
+    // may want; the case we reject is the no-arg call that would
+    // accidentally override an active autonomous mode without intent.
     auto vx = optional_double(c.args, "vx");
     if (!vx.ok) return err(c.request_id, vx.error);
     auto vy = optional_double(c.args, "vy");
@@ -199,20 +202,29 @@ ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     if (name.empty()) return err(c.request_id, "missing_param_name");
     if (!ctx.param) return err(c.request_id, "param_not_initialized");
 
+    // Pass-14 added require_double / optional_double for the offboard
+    // handlers; set_param was missed. Use the same explicit type-check
+    // here — a hallucinated `"int_value": "5"` would otherwise default
+    // to 0 and silently zero a flight param via `value()`'s lossy
+    // coerce-on-mismatch behavior.
     if (c.args.contains("int_value")) {
-        int v = c.args.value("int_value", 0);
-        auto r = ctx.param->set_param_int(name, v);
+        auto v = require_double(c.args, "int_value");
+        if (!v.ok) return err(c.request_id, v.error);
+        int iv = static_cast<int>(v.value);
+        auto r = ctx.param->set_param_int(name, iv);
         if (r == Param::Result::Success) {
-            std::fprintf(stderr, "[flight-bridge] set_param %s=%d ok\n", name.c_str(), v);
+            std::fprintf(stderr, "[flight-bridge] set_param %s=%d ok\n", name.c_str(), iv);
             return ok(c.request_id);
         }
         return err(c.request_id, "param_set_failed:" + param_result_to_string(r));
     }
     if (c.args.contains("float_value")) {
-        float v = c.args.value("float_value", 0.0f);
-        auto r = ctx.param->set_param_float(name, v);
+        auto v = require_double(c.args, "float_value");
+        if (!v.ok) return err(c.request_id, v.error);
+        float fv = static_cast<float>(v.value);
+        auto r = ctx.param->set_param_float(name, fv);
         if (r == Param::Result::Success) {
-            std::fprintf(stderr, "[flight-bridge] set_param %s=%g ok\n", name.c_str(), v);
+            std::fprintf(stderr, "[flight-bridge] set_param %s=%g ok\n", name.c_str(), fv);
             return ok(c.request_id);
         }
         return err(c.request_id, "param_set_failed:" + param_result_to_string(r));

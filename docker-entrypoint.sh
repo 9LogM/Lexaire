@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 if [ -d /mnt/ssh ]; then
     mkdir -p /root/.ssh
