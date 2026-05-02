@@ -44,10 +44,10 @@ cp .env.example .env
 
 ### Pi setup
 
-The MAVLink relay and the L515 publisher both run on the Pi.
+The MAVLink relay and the sensor publisher both run on the Pi, and Lexaire auto-deploys both — set `DRONE_PI_IP` in `.env` and `sensor.publisher_repo` in `common/config.yaml`, and the TUI handles the rest on first launch.
 
-- **MAVLink relay** lives in this repo (`relay/`). Lexaire deploys it automatically the first time the TUI starts. After that, `restart: unless-stopped` keeps it up across reboots.
-- **L515 publisher** is a separate repo: [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker). Clone it on the Pi and `docker compose up -d`. Independent of this repo's release cadence.
+- **MAVLink relay** lives in this repo (`relay/`). The TUI streams the build context to the Pi over SSH (`DOCKER_HOST=ssh://`) and runs `docker compose up -d --build`.
+- **Sensor publisher** is whatever repo `sensor.publisher_repo` points at (default: [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker)). The TUI SSHes to the Pi, clones the repo to `~/lexaire-publisher`, and brings it up there. Subsequent launches `git fetch` and only rebuild when `origin/HEAD` actually moved (otherwise just `up -d`); changing the URL tears the old project down and re-clones. The repo just needs a top-level docker-compose file that `docker compose up -d` (and `--build` on first deploy) accepts and ZMQ binds matching `sensor.channels`.
 
 ### SSH key setup
 
@@ -65,15 +65,16 @@ docker compose build
 docker compose run --rm lexaire
 ```
 
-The TUI brings up the GCS stack via `depends_on` and auto-deploys the relay to the Pi if it's not already running. Header indicators (`Stack`, `Relay`, `QGC`) reflect live state; menu options:
+The TUI brings up the GCS stack via `depends_on` and auto-deploys the relay and sensor publisher to the Pi if either isn't already running. Header indicators (`Stack`, `Pub`, `Relay`, `QGC`) reflect live state; menu options:
 
 ```
-1. Pre-flight check        # scripts/preflight.sh: .env, config, drone link, L515 ports
+1. Pre-flight check        # scripts/preflight.sh: .env, config, drone link, sensor publisher ports
 2. QGroundControl setup    # how to point QGC at the relay
 3. Live telemetry monitor  # reads from the bridge's published telemetry
 4. Service status monitor  # per-service freshness + last state
 5. Restart relay           # force-redeploy on the Pi
-6. Restart GCS stack       # rebuild + restart local containers
+6. Restart publisher       # fetch + (rebuild only if origin/HEAD moved) on the Pi
+7. Restart GCS stack       # rebuild + restart local containers
 ```
 
 Voice commands go through the `stt` service:
@@ -114,15 +115,25 @@ The companion computer is a dumb MAVLink bridge. All logic — telemetry, comman
 | Boost.Asio | system | Ground station | Async event loop |
 | ncurses | system | Ground station | Terminal UI |
 
-### Relay deployment
+### Pi-side deployment
 
-The `relay/` directory contains the relay's Dockerfile and entrypoint. The TUI auto-deploys it on first launch via:
+The TUI deploys two pieces to the Pi on launch:
+
+**Relay** (in-tree, `relay/`):
 
 ```bash
 DOCKER_HOST=ssh://<drone_host> docker compose -f relay/docker-compose.yaml up -d --build
 ```
 
-Docker streams the `relay/` build context over SSH to the companion computer's daemon, which builds and starts the container natively. The companion computer never needs the repo cloned. `restart: unless-stopped` keeps the relay running across reboots; menu option **5. Restart relay** force-redeploys when needed.
+Docker streams the `relay/` build context over SSH to the companion computer's daemon, which builds and starts the container natively. The companion never needs the repo cloned. `restart: unless-stopped` keeps it running across reboots; menu option **5. Restart relay** force-redeploys when needed.
+
+**Sensor publisher** (out-of-tree, URL from `sensor.publisher_repo`):
+
+```bash
+ssh <drone_host> 'bash -s -- <publisher_repo>' < pi-setup/deploy-publisher.sh
+```
+
+Different mechanism (the publisher's source isn't on the GCS, so the build context can't be streamed) but identical operator experience: clones to `~/lexaire-publisher` first time, `git fetch` thereafter, only `--build`s when `origin/HEAD` actually moved (otherwise just `up -d` to keep SD-card writes off the critical path), and tears the old project down and re-clones if `publisher_repo` changed. Lexaire makes exactly one assumption about the publisher repo — that it has a top-level `docker-compose.yaml` (or `compose.yaml`) that `docker compose up -d` (and `--build` on first deploy and after upstream changes) accepts. Container names, service names, build context layout, env vars, device mounts are the publisher's business. Menu option **6. Restart publisher** force-redeploys.
 
 ---
 
@@ -138,7 +149,7 @@ Docker streams the `relay/` build context over SSH to the companion computer's d
 | `stt` | [`python/services/stt/`](python/services/stt/) | Voice command source. Modes: text-input via stdin / `--once` / `--from-file`, or `--audio-file` for pre-recorded WAV (uses `faster-whisper`). Mic capture is a follow-up. Profile-gated: `docker compose --profile tools run --rm stt --once "land"`. |
 | `replay` | [`python/services/replay/`](python/services/replay/) | Field-debug tool: SUBs the live sensor channels and writes a JSONL recording (`record`), or replays one back as PUBs (`play`). Profile-gated. |
 
-The sensor publisher (default: [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker)) lives in a separate repo and runs on the Raspberry Pi. Any docker-based ZMQ publisher that matches the channel encoding works — point `sensor.publisher_repo` at it and adjust `sensor.channels`.
+The sensor publisher (default: [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker)) is auto-deployed by the TUI to `~/lexaire-publisher` on the Pi. Any docker-based ZMQ publisher that matches the channel encoding works — point `sensor.publisher_repo` at it (and adjust `sensor.channels` if the new publisher uses different ports).
 
 ### Wiring at a glance
 
@@ -167,7 +178,7 @@ The sensor publisher (default: [`RS-L515-Docker`](https://github.com/9LogM/RS-L5
 
 Project-shared defaults live in [`common/config.yaml`](common/config.yaml); secrets and per-machine values live in `.env`. Key fields:
 
-- `sensor.publisher_repo` — URL of the sensor publisher project deployed on the Pi (default L515).
+- `sensor.publisher_repo` — URL of the docker-based ZMQ sensor publisher repo. The TUI auto-clones it on the Pi and keeps it in sync with origin (default L515).
 - `sensor.channels.{rgb,depth,imu,infrared,confidence}` — ZMQ endpoints the publisher exposes. Each can be left blank to disable that stream; perception/orchestrator require `rgb` and `depth` and fail at startup if either is blank, replay subscribes to whichever are non-empty.
 - `perception.vlm.{provider,model,api_key_env,temperature}` — currently `gemini` with `gemini-2.5-flash`. Requires `GEMINI_API_KEY` in `.env`.
 - `perception.detector.{model,weights,score_threshold,...}` — YOLO11; `yolo11n.pt` is auto-downloaded on first run.

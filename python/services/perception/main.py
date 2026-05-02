@@ -1,7 +1,7 @@
 """
 Perception service.
 
-Subscribes to the RGB and depth streams from the Pi-side L515 publisher,
+Subscribes to the RGB and depth streams from the Pi-side sensor publisher,
 throttles to `perception.tick_hz`, runs a detector on the latest
 synchronized frameset, and publishes a SceneHeader on
 `services.perception_scene_pub`. Provides a cheap, always-available scene

@@ -127,19 +127,49 @@ else
         warn "ssh not available; skipping SSH test"
     fi
 
-    # Sensor publisher ports (default L515 layout): 5555 rgb, 5556 depth,
-    # 5557 imu, 5558 infrared, 5559 confidence. If the publisher isn't
-    # running on the Pi, perception will SUB silently and never see a
-    # frame. Use bash /dev/tcp; portable to slim images without nc.
-    L515_HINT="see https://github.com/9LogM/RS-L515-Docker for the publisher"
-    for port in 5555 5556 5557 5558 5559; do
-        if (exec 3<>"/dev/tcp/$HOST/$port") 2>/dev/null; then
-            exec 3<&-; exec 3>&-
-            ok "sensor publisher port $port open on $HOST"
-        else
-            warn "sensor publisher port $port not reachable on $HOST ($L515_HINT)"
-        fi
-    done
+    # Sensor publisher ports — read from sensor.channels in the config so
+    # this tracks whatever publisher the operator pointed at. Skip blank
+    # channels (operator can disable a stream by leaving it empty). If the
+    # publisher isn't running on the Pi, perception will SUB silently and
+    # never see a frame. Use bash /dev/tcp; portable to slim images without nc.
+    PUBLISHER_REPO="$(awk '
+        /^sensor:/      { in_sensor=1; next }
+        /^[a-zA-Z]/     { in_sensor=0 }
+        in_sensor && /^[[:space:]]+publisher_repo:/ {
+            sub(/^[[:space:]]+publisher_repo:[[:space:]]*/, "")
+            sub(/[[:space:]]*#.*$/, "")
+            print
+            exit
+        }
+    ' "$CFG")"
+    PUBLISHER_HINT="see ${PUBLISHER_REPO:-sensor.publisher_repo in $CFG} for the publisher"
+
+    CHANNEL_PORTS="$(awk '
+        /^sensor:/                  { in_sensor=1; next }
+        /^[a-zA-Z]/                 { in_sensor=0; in_channels=0 }
+        in_sensor && /^  channels:/ { in_channels=1; next }
+        in_sensor && /^  [a-zA-Z]/  { in_channels=0 }
+        in_channels && /^    [a-zA-Z_]+:[[:space:]]+tcp:\/\// {
+            v=$0
+            sub(/^    [a-zA-Z_]+:[[:space:]]+/, "", v)
+            sub(/[[:space:]]*#.*$/, "", v)
+            n=split(v, parts, ":")
+            if (n>=3) print parts[n]
+        }
+    ' "$CFG")"
+
+    if [ -z "$CHANNEL_PORTS" ]; then
+        warn "no sensor channels configured in $CFG"
+    else
+        for port in $CHANNEL_PORTS; do
+            if (exec 3<>"/dev/tcp/$HOST/$port") 2>/dev/null; then
+                exec 3<&-; exec 3>&-
+                ok "sensor publisher port $port open on $HOST"
+            else
+                warn "sensor publisher port $port not reachable on $HOST ($PUBLISHER_HINT)"
+            fi
+        done
+    fi
 fi
 
 # ---- Summary --------------------------------------------------------------

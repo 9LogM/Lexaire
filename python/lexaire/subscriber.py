@@ -1,10 +1,10 @@
 """
 Sensor subscriber.
 
-Subscribes to the RGB and depth ZMQ publishers from the Pi, decodes each frame,
-and yields synchronized framesets joined on the librealsense sequence number.
-The Pi publishes color and depth from the same `pipeline.wait_for_frames()`
-so their sequence numbers align one-to-one.
+Subscribes to the RGB and depth ZMQ publishers configured in `sensor.channels`,
+decodes each frame, and yields synchronized framesets joined on the publisher's
+sequence number. The publisher must emit matching seq values for the rgb and
+depth frames captured together so the matcher can pair them one-to-one.
 """
 
 from __future__ import annotations

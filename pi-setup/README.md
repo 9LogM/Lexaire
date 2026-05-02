@@ -1,6 +1,12 @@
 # pi-setup
 
-One-time infrastructure setup for a drone Pi, separate from the containerized L515 publisher (lives in [`RS-L515-Docker`](https://github.com/9LogM/RS-L515-Docker)).
+Pi-side bash scripts that the ground-station-side TUI pipes over SSH. Three live here:
+
+- `setup-ap.sh` — one-time AP-mode bring-up (operator runs once per Pi build, see below)
+- `deploy-publisher.sh` — sensor-publisher clone+up; called automatically by the TUI on launch and from the "Restart publisher" menu, never run manually
+- `check-publisher.sh` — sensor-publisher liveness probe; called automatically by the TUI on launch, never run manually
+
+The TUI bakes this directory into the lexaire image (Dockerfile `COPY . .`) and references the scripts at `/workspace/pi-setup/*.sh`. Edits here ship with the next image build.
 
 ## `setup-ap.sh`
 

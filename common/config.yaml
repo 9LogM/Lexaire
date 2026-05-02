@@ -8,11 +8,20 @@ drone:
   mavsdk_udp:    udpout://drone.local:14551
 
 sensor:
-  # Documentation-only pointer to the sensor publisher project the operator
-  # deploys on the Pi — any docker-based ZMQ publisher works as long as it
-  # binds the channels below with the matching encoding. Default: Intel
-  # RealSense L515 (RGB + depth + IMU + IR + confidence). No code reads
-  # this field; it's here so the project is self-documenting.
+  # URL of the docker-based ZMQ sensor publisher. This is the only piece
+  # of publisher config the operator provides — the TUI clones this repo
+  # to ~/lexaire-publisher on the Pi at startup and brings it up there
+  # (mirrors the relay; see ensure_publisher_running in src/main.cpp).
+  # Subsequent launches `git fetch` and only rebuild the image when
+  # origin/HEAD actually moved (avoids needless SD-card writes).
+  # Changing this URL tears the old project down and re-clones.
+  #
+  # Any docker-based ZMQ publisher works as long as it binds the channels
+  # below with the matching encoding and has a top-level docker-compose
+  # file that `docker compose up -d` (and `--build` on first deploy) will
+  # accept. Default: Intel RealSense L515 (RGB + depth + IMU + IR +
+  # confidence). Swap freely: D435i, OAK-D, a synthetic publisher for
+  # SITL — config change, not a code change.
   publisher_repo: https://github.com/9LogM/RS-L515-Docker
 
   # ZMQ endpoint per stream. Leave a value blank to disable that channel
