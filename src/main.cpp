@@ -363,10 +363,17 @@ static void start_render_loop(AppContext& ctx) {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-// Defined alongside the publisher state machine further down; forward-declared
-// here so case 6 ("Restart publisher") can build the same shell command the
-// startup-time ensure_publisher_running uses.
+// Forward decls for helpers defined alongside the deploy state machines
+// below — the menu cases in process_command consume them before the
+// definitions appear.
 static std::string publisher_deploy_cmd(const AppContext& ctx);
+static std::string relay_deploy_cmd(const AppContext& ctx);
+static void run_deploy(AppContext& ctx,
+                        ServiceState* state,
+                        const std::string& title,
+                        const std::string& progress,
+                        const std::string& shell_cmd,
+                        const std::string& ok_suffix);
 
 static void process_command(AppContext& ctx, const std::string& cmd) {
     if (ctx.state == State::MainMenu) {
@@ -436,41 +443,22 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 5: {
-                // Force-redeploy of the relay on the Pi. Useful when relay/
-                // scripts changed locally and you want them picked up, or
-                // when the running relay container has gone wedged. The
-                // up-to-date check inside ensure_relay_running treats a
-                // running relay as final, so this path bypasses it.
-                ctx.relay_state = ServiceState::Deploying;
-                ctx.sub_content =
-                    "  RESTART RELAY\n\n"
-                    "  Redeploying - may take a few minutes if the image rebuilds...\n\n";
-                ctx.state = State::SubMenu;
-                render(ctx);
-                std::string shell_cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
-                    " SERIAL_DEVICE=" + ctx.serial_device +
-                    " SERIAL_BAUD=" + std::to_string(ctx.serial_baud) +
-                    " docker compose -f relay/docker-compose.yaml up -d --build" +
-                    " >>" + TUI_LOG_PATH + " 2>&1";
-                boost::process::async_system(
-                    ctx.io,
-                    [&ctx](boost::system::error_code, int rc) {
-                        ctx.relay_state = (rc == 0) ? ServiceState::Up : ServiceState::Unknown;
-                        ctx.sub_content += rc == 0
-                            ? "  Relay redeployed."
-                            : "  Failed (exit " + std::to_string(rc) + ").\n"
-                              "  See " + TUI_LOG_PATH + " for stderr.";
-                        ctx.sub_content += "\n\n  Press Enter to return.";
-                        render(ctx);
-                    },
-                    boost::process::shell, shell_cmd
-                );
+                // Force-redeploy of the relay on the Pi. Useful when
+                // relay/ scripts changed locally and you want them picked
+                // up, or when the running relay container has gone wedged.
+                // The up-to-date check inside ensure_relay_running treats
+                // a running relay as final, so this path bypasses it.
+                run_deploy(ctx, &ctx.relay_state,
+                    "RESTART RELAY",
+                    "Redeploying - may take a few minutes if the image rebuilds...",
+                    relay_deploy_cmd(ctx),
+                    "  Relay redeployed.");
                 break;
             }
             case 6: {
                 // Force-redeploy of the sensor publisher. Mirrors case 5
-                // (relay) but invokes pi-setup/deploy-publisher.sh, which
-                // is smart-build aware — skips `--build` when origin/HEAD
+                // but invokes pi-setup/deploy-publisher.sh, which is
+                // smart-build aware — skips `--build` when origin/HEAD
                 // didn't move.
                 //
                 // Re-entry guard: deploy is async on the io_context, so a
@@ -498,56 +486,22 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                     render(ctx);
                     break;
                 }
-                ctx.publisher_state = ServiceState::Deploying;
-                ctx.sub_content =
-                    "  RESTART PUBLISHER\n\n"
-                    "  Syncing with origin and rebuilding if needed - "
-                    "may take a few minutes...\n\n";
-                ctx.state = State::SubMenu;
-                render(ctx);
-                std::string shell_cmd = publisher_deploy_cmd(ctx);
-                boost::process::async_system(
-                    ctx.io,
-                    [&ctx](boost::system::error_code, int rc) {
-                        ctx.publisher_state = (rc == 0)
-                            ? ServiceState::Up
-                            : ServiceState::Unknown;
-                        ctx.sub_content += rc == 0
-                            ? "  Publisher redeployed."
-                            : "  Failed (exit " + std::to_string(rc) + ").\n"
-                              "  See " + TUI_LOG_PATH + " for stderr.";
-                        ctx.sub_content += "\n\n  Press Enter to return.";
-                        render(ctx);
-                    },
-                    boost::process::shell, shell_cmd
-                );
+                run_deploy(ctx, &ctx.publisher_state,
+                    "RESTART PUBLISHER",
+                    "Syncing with origin and rebuilding if needed - may take a few minutes...",
+                    publisher_deploy_cmd(ctx),
+                    "  Publisher redeployed.");
                 break;
             }
             case 7: {
                 // Rebuild and restart the local GCS stack containers
-                // (perception, orchestrator, flight-bridge). Picks up code
-                // changes without dropping out of the TUI to the host shell.
-                ctx.stack_state = ServiceState::Deploying;
-                ctx.sub_content =
-                    "  RESTART GCS STACK\n\n"
-                    "  Rebuilding and restarting local services...\n\n";
-                ctx.state = State::SubMenu;
-                render(ctx);
-                std::string shell_cmd = std::string(
-                    "docker compose up -d --build >>") + TUI_LOG_PATH + " 2>&1";
-                boost::process::async_system(
-                    ctx.io,
-                    [&ctx](boost::system::error_code, int rc) {
-                        ctx.stack_state = (rc == 0) ? ServiceState::Up : ServiceState::Unknown;
-                        ctx.sub_content += rc == 0
-                            ? "  GCS stack restarted."
-                            : "  Failed (exit " + std::to_string(rc) + ").\n"
-                              "  See " + TUI_LOG_PATH + " for stderr.";
-                        ctx.sub_content += "\n\n  Press Enter to return.";
-                        render(ctx);
-                    },
-                    boost::process::shell, shell_cmd
-                );
+                // (perception, orchestrator, flight-bridge). Picks up
+                // code changes without dropping to the host shell.
+                run_deploy(ctx, &ctx.stack_state,
+                    "RESTART GCS STACK",
+                    "Rebuilding and restarting local services...",
+                    std::string("docker compose up -d --build >>") + TUI_LOG_PATH + " 2>&1",
+                    "  GCS stack restarted.");
                 break;
             }
             default:
@@ -647,6 +601,48 @@ static std::string publisher_deploy_cmd(const AppContext& ctx) {
         + " >>" + TUI_LOG_PATH + " 2>&1";
 }
 
+// Streamed via DOCKER_HOST=ssh:// — the lexaire image owns the relay
+// source, the Pi just gets the build context over SSH and runs it
+// natively. Used by both the startup auto-deploy (ensure_relay_running)
+// and the menu-triggered redeploy (case 5).
+static std::string relay_deploy_cmd(const AppContext& ctx) {
+    return "DOCKER_HOST=ssh://" + ctx.drone_host
+        + " SERIAL_DEVICE=" + ctx.serial_device
+        + " SERIAL_BAUD=" + std::to_string(ctx.serial_baud)
+        + " docker compose -f relay/docker-compose.yaml up -d --build"
+        + " >>" + TUI_LOG_PATH + " 2>&1";
+}
+
+// Common scaffolding for menu-triggered redeploys. Caller hands in the
+// state field to flip, the sub-view title and progress lines, the shell
+// command to run, and the success-suffix to append on rc==0. Failure
+// formatting (exit code + log path) is the same for every deploy so it
+// lives here.
+static void run_deploy(AppContext& ctx,
+                        ServiceState* state,
+                        const std::string& title,
+                        const std::string& progress,
+                        const std::string& shell_cmd,
+                        const std::string& ok_suffix) {
+    *state = ServiceState::Deploying;
+    ctx.sub_content = "  " + title + "\n\n  " + progress + "\n\n";
+    ctx.state = State::SubMenu;
+    render(ctx);
+    boost::process::async_system(
+        ctx.io,
+        [&ctx, state, ok_suffix](boost::system::error_code, int rc) {
+            *state = (rc == 0) ? ServiceState::Up : ServiceState::Unknown;
+            ctx.sub_content += rc == 0
+                ? ok_suffix
+                : "  Failed (exit " + std::to_string(rc) + ").\n"
+                  "  See " + TUI_LOG_PATH + " for stderr.";
+            ctx.sub_content += "\n\n  Press Enter to return.";
+            render(ctx);
+        },
+        boost::process::shell, shell_cmd
+    );
+}
+
 static std::string publisher_check_cmd(const AppContext& ctx) {
     return std::string("ssh -o BatchMode=yes -o ConnectTimeout=5 ")
         + ctx.drone_host
@@ -703,11 +699,7 @@ static void ensure_relay_running(AppContext& ctx) {
             ctx.relay_state = ServiceState::Deploying;
             request_render(ctx);
 
-            std::string deploy_cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
-                " SERIAL_DEVICE=" + ctx.serial_device +
-                " SERIAL_BAUD=" + std::to_string(ctx.serial_baud) +
-                " docker compose -f relay/docker-compose.yaml up -d --build" +
-                " >>" + TUI_LOG_PATH + " 2>&1";
+            std::string deploy_cmd = relay_deploy_cmd(ctx);
             boost::process::async_system(
                 ctx.io,
                 [&ctx](boost::system::error_code, int deploy_rc) {

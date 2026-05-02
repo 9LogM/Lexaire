@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 
@@ -53,7 +53,11 @@ class VoiceCommand:
 class ToolCall:
     request_id: str
     name: str
-    args: dict
+    # Match the C++ side (lexaire/messages.hpp:ToolCall::from_json), which
+    # decodes a missing `args` field as an empty object. Without the default
+    # here, constructing a no-arg tool call (e.g. arm/disarm/abort/kill)
+    # would TypeError on the keyword.
+    args: dict = field(default_factory=dict)
 
 
 @dataclass

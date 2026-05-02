@@ -97,12 +97,17 @@ struct ToolResult {
     std::string error;
     json        data = json::object();
 
+    // Emit null (not "" / {}) for empty error / empty data so the wire
+    // shape matches the Python ToolResult dataclass, which uses
+    // Optional[str]=None / Any=None. Without this, the orchestrator
+    // sees error="" on success — harmless today but a footgun for
+    // anyone writing `if result.error:`-style checks.
     json to_json() const {
         return {
             {"request_id", request_id},
             {"ok", ok},
-            {"error", error},
-            {"data", data},
+            {"error", error.empty() ? json(nullptr) : json(error)},
+            {"data",  data.empty()  ? json(nullptr) : data},
         };
     }
 };

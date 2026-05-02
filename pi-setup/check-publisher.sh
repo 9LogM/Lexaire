@@ -15,22 +15,20 @@
 #   1 = Down    (no project / no containers / all stopped)
 #   2 = Unknown (docker daemon unreachable or unexpected failure)
 
-set -u
+set -euo pipefail
 
 DIR="$HOME/lexaire-publisher"
 
-if [ ! -d "$DIR" ]; then
-    exit 1
-fi
+# Down: directory not present yet.
+[ -d "$DIR" ] || exit 1
 
 cd "$DIR" || exit 1
 
-if ! out="$(docker compose ps -q --status running 2>/dev/null)"; then
-    exit 2
-fi
+# Capture-or-Unknown: a non-zero from `docker compose ps` is the
+# daemon-unreachable signal, distinct from "no containers running".
+out="$(docker compose ps -q --status running 2>/dev/null)" || exit 2
 
-if [ -z "$out" ]; then
-    exit 1
-fi
+# No running containers in the project = Down.
+[ -n "$out" ] || exit 1
 
 exit 0

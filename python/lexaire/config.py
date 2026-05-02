@@ -22,13 +22,19 @@ import yaml
 
 class _AttrDict(dict):
     """dict that also allows attribute access. Nested dicts are wrapped
-    eagerly by `_wrap` at load time."""
+    eagerly by `_wrap` at load time, but direct `_AttrDict({...})`
+    construction skips that — the lazy-wrap below covers that path so
+    `_AttrDict({"a": {"b": 1}}).a.b` works."""
 
     def __getattr__(self, name: str) -> Any:
         try:
-            return self[name]
+            v = self[name]
         except KeyError as e:
             raise AttributeError(name) from e
+        if isinstance(v, dict) and not isinstance(v, _AttrDict):
+            v = _AttrDict(v)
+            self[name] = v
+        return v
 
     def __setattr__(self, name: str, value: Any) -> None:
         self[name] = value

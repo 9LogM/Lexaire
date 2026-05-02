@@ -91,19 +91,26 @@ ToolResult err(const std::string& req, const std::string& msg) {
 
 // ---- Individual handlers ----
 
-ToolResult handle_arm(const ToolCall& c, FlightCtx& ctx) {
+// Common body for arg-less Action plugin calls (arm/disarm/land/RTL/hold).
+// Each handler used to be a 6-line clone differing only by the method
+// pointer; this collapses the body into one place. Wrapping with one
+// thin handler per tool name (rather than a function template) keeps
+// the dispatch table's value type uniform (`ToolResult(*)(...)`) and
+// avoids surprises with member-function-pointer template args inside
+// the anonymous namespace.
+ToolResult call_action_method(const ToolCall& c, FlightCtx& ctx,
+                                Action::Result (Action::*method)() const) {
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->arm();
+    auto r = (ctx.action.get()->*method)();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
 }
 
-ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) {
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->disarm();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
+ToolResult handle_arm   (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::arm); }
+ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::disarm); }
+ToolResult handle_land  (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::land); }
+ToolResult handle_rtl   (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::return_to_launch); }
+ToolResult handle_hold  (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::hold); }
 
 ToolResult handle_takeoff(const ToolCall& c, FlightCtx& ctx) {
     auto alt = require_double(c.args, "altitude_m");
@@ -111,27 +118,6 @@ ToolResult handle_takeoff(const ToolCall& c, FlightCtx& ctx) {
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
     ctx.action->set_takeoff_altitude(static_cast<float>(alt.value));
     auto r = ctx.action->takeoff();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
-
-ToolResult handle_land(const ToolCall& c, FlightCtx& ctx) {
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->land();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
-
-ToolResult handle_rtl(const ToolCall& c, FlightCtx& ctx) {
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->return_to_launch();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
-
-ToolResult handle_hold(const ToolCall& c, FlightCtx& ctx) {
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->hold();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
 }
