@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import concurrent.futures
 import dataclasses
 import json
 import queue
@@ -145,6 +146,26 @@ class Orchestrator:
         self._abort_pattern = re.compile(
             rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
 
+        # Voice-arm authorization. The bridge's safety gate (safety.hpp)
+        # only allows arm when args.voice_confirmed is true; this regex
+        # decides whether the orchestrator is allowed to set that flag.
+        # Set per command in _on_command, consulted in _dispatch_tool_call.
+        # Without this, a VLM-emitted arm during an unrelated mission
+        # ("take a picture") would still pass the gate.
+        self._arm_pattern = re.compile(r"\barm\b", re.IGNORECASE)
+        self._current_arm_authorized = False
+
+        # Set by the command thread when an abort arrives so the main
+        # thread can abandon any in-flight VLM call instead of waiting
+        # out the full RTT (Gemini calls have no built-in timeout).
+        self._preempt_event = threading.Event()
+
+        # Two workers so a stale post-preempt VLM call doesn't block the
+        # next normal command's submit. Stale futures keep running to
+        # completion in the background; we just never read their result.
+        self._vlm_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="orch-vlm")
+
     # -- Lifecycle ------------------------------------------------------------
 
     def start(self):
@@ -163,6 +184,9 @@ class Orchestrator:
 
     def stop(self):
         self.stop_event.set()
+        self._preempt_event.set()
+        # Don't wait for in-flight VLM calls — they own external HTTP RTT.
+        self._vlm_executor.shutdown(wait=False, cancel_futures=True)
         self.sub.stop()
         for t in self._threads:
             t.join(timeout=1.5)
@@ -203,6 +227,10 @@ class Orchestrator:
                     if drained:
                         self.log.warning("abort drained %d pending commands", drained)
                     self.command_q.put_nowait(cmd)
+                    # Wake the main thread out of any in-flight VLM call so
+                    # the abort doesn't wait for Gemini's RTT (or forever
+                    # if the call hangs).
+                    self._preempt_event.set()
                 else:
                     try:
                         self.command_q.put_nowait(cmd)
@@ -270,10 +298,22 @@ class Orchestrator:
     def _on_command(self, cmd: VoiceCommand):
         # Each new voice command gets a fresh attempt — without this, a
         # single REQ timeout would lock out the orchestrator forever
-        # (the on-success clear at line ~424 is unreachable while the
-        # short-circuit at the top of _dispatch_tool_call returns early).
+        # (the on-success clear in _dispatch_tool_call is unreachable
+        # while the bridge_offline short-circuit at the top of that
+        # function returns early).
         with self._bridge_lock:
             self._bridge_offline_flag = False
+
+        # Clear any preempt signal from the previous command — we're
+        # about to start consuming from the command queue and the
+        # main-loop poll below should only react to NEW signals.
+        self._preempt_event.clear()
+
+        # Decide arm authorization once per user command. This flips
+        # voice_confirmed in _dispatch_tool_call only when the operator
+        # actually said "arm" — without this, a VLM-emitted arm during
+        # any other utterance ("take a picture") would defeat the gate.
+        self._current_arm_authorized = bool(self._arm_pattern.search(cmd.text))
 
         if cmd.is_abort or self._abort_pattern.search(cmd.text):
             self._publish_status("aborted", f"abort keyword: {cmd.text!r}")
@@ -293,25 +333,52 @@ class Orchestrator:
                         "abort_failed",
                         f"abort rejected by bridge: {result.error}",
                     )
+            # Aborts are the most safety-critical events; they MUST land
+            # in the audit trail even though the rest of the mission state
+            # machine is short-circuited above.
+            suffix = "" if result.ok else f" ({result.error})"
+            self.history.append(f"user: {cmd.text} | end: aborted{suffix}")
+            self.history[:] = self.history[-20:]
             return
 
         max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))
         mission = OrchestratorMission(goal_text=cmd.text, started_ts_ns=now_ns())
+        # decision_count bounds VLM calls; mission.current_step counts
+        # individual tool calls (a VLM batch of N tool calls used to chew
+        # N steps from this budget, which made the field name lie).
+        decision_count = 0
         terminal_call: Optional[str] = None
         stuck = False
         vlm_error: Optional[str] = None
+        preempted = False
 
-        # Re-prompt the VLM with each tool result; bounded by max_steps and
-        # preempted by a fresh voice command (next run() iteration picks it up).
-        while mission.current_step < max_steps and not self.stop_event.is_set():
-            if not self.command_q.empty():
+        # Re-prompt the VLM with each tool result; bounded by max_steps
+        # decisions and preempted by a fresh voice command (next run()
+        # iteration picks it up).
+        while decision_count < max_steps and not self.stop_event.is_set():
+            if self._preempt_event.is_set() or not self.command_q.empty():
                 self.log.info("mission preempted by new voice command")
+                preempted = True
                 break
 
             ctx = self._build_context(cmd, mission=mission)
-            step_label = f"step {mission.current_step + 1}/{max_steps}"
+            step_label = f"decision {decision_count + 1}/{max_steps}"
             self._publish_status("thinking", f"{step_label}: {cmd.text!r}")
-            decision = self.vlm.decide(ctx)
+
+            # Run the VLM call on a worker so we can poll _preempt_event
+            # and bail when the operator says "abort" mid-call. The stale
+            # future keeps running to completion; we just discard it.
+            fut = self._vlm_executor.submit(self.vlm.decide, ctx)
+            while not fut.done():
+                if self.stop_event.is_set() or self._preempt_event.is_set():
+                    break
+                time.sleep(0.05)
+            if self._preempt_event.is_set() or self.stop_event.is_set():
+                self.log.info("VLM call abandoned (preempt or shutdown)")
+                preempted = True
+                break
+            decision = fut.result()
+            decision_count += 1
             self.log.info("%s decision: %s -> %d tool_calls",
                           step_label, decision.thought, len(decision.tool_calls))
 
@@ -327,12 +394,14 @@ class Orchestrator:
             self._publish_status("executing", decision.thought)
             offline = False
             stuck = False
-            for tc in decision.tool_calls:
+            for i, tc in enumerate(decision.tool_calls):
                 if self.stop_event.is_set():
                     break
                 result = self._dispatch_tool_call(tc)
                 mission.record(tc.name, dict(tc.args or {}), result)
                 if result.error in ("bridge_offline", "timeout"):
+                    self._record_skipped(mission, decision.tool_calls[i + 1:],
+                                         "skipped:bridge_offline")
                     offline = True
                     break
                 if not result.ok and result.error is not None:
@@ -342,6 +411,8 @@ class Orchestrator:
                     )
                     # End the mission once the VLM is stuck on a loop it can't
                     # escape on its own (canonical case: PX4 'Arming denied').
+                    self._record_skipped(mission, decision.tool_calls[i + 1:],
+                                         "skipped:prior_failure")
                     if matches >= _STUCK_FAILURE_THRESHOLD:
                         self.log.warning(
                             "mission stuck: %s failed %d times with %r; bailing",
@@ -350,26 +421,31 @@ class Orchestrator:
                         break
                     break
                 if tc.name in _TERMINAL_TOOLS:
+                    self._record_skipped(mission, decision.tool_calls[i + 1:],
+                                         "skipped:after_terminal")
                     terminal_call = tc.name
                     break
 
             if terminal_call is not None or offline or stuck:
                 break
 
-        if terminal_call:
+        if preempted:
+            end_reason = "preempted"
+        elif terminal_call:
             end_reason = f"terminal:{terminal_call}"
         elif self._bridge_offline():
             end_reason = "bridge_offline"
         elif vlm_error is not None:
             end_reason = "vlm_error"
-        elif mission.current_step >= max_steps:
-            end_reason = f"max_steps={max_steps}"
+        elif decision_count >= max_steps:
+            end_reason = f"max_decisions={max_steps}"
         elif stuck:
             end_reason = "stuck_on_repeated_failure"
         else:
             end_reason = "no_tool_calls"
         self.history.append(
-            f"user: {cmd.text} | steps: {mission.current_step} | end: {end_reason}"
+            f"user: {cmd.text} | decisions: {decision_count} "
+            f"| tools: {mission.current_step} | end: {end_reason}"
         )
         self.history[:] = self.history[-20:]
         # Bridge-offline and vlm_error already / want to surface their own
@@ -378,6 +454,20 @@ class Orchestrator:
             self._publish_status("vlm_error", vlm_error or "vlm_error")
         elif end_reason != "bridge_offline":
             self._publish_status("idle", f"mission done ({end_reason})")
+
+    @staticmethod
+    def _record_skipped(mission: OrchestratorMission,
+                         remaining: list, reason: str) -> None:
+        """Drop k+1..N from a partially-executed batch into step_history
+        as failures so the audit trail and the VLM's `mission` view
+        reflect what actually didn't run, instead of vanishing them."""
+        for skipped in remaining:
+            mission.record(
+                skipped.name,
+                dict(skipped.args or {}),
+                ToolResult(request_id=skipped.request_id,
+                            ok=False, error=reason),
+            )
 
     def _build_context(
         self,
@@ -436,11 +526,14 @@ class Orchestrator:
                                   f"refusing {tc.name}: prior dispatch timed out")
             return ToolResult(request_id=tc.request_id, ok=False, error="bridge_offline")
 
-        # Every arm dispatched by the orchestrator is by definition the result
-        # of a spoken voice command — the bridge's safety gate flips on this
-        # flag to prove the arm was pilot-initiated, not LLM-hallucinated.
+        # The bridge's safety gate at safety.hpp accepts an arm only when
+        # args.voice_confirmed is set. Set it ONLY when the user's
+        # current voice command actually contained an arm intent — see
+        # _arm_pattern set in __init__ and authorized in _on_command.
+        # Without this guard a VLM-emitted arm during any unrelated
+        # utterance defeats the gate.
         args = dict(tc.args) if tc.args else {}
-        if tc.name == "arm":
+        if tc.name == "arm" and self._current_arm_authorized:
             args["voice_confirmed"] = True
 
         req = self._ensure_req_socket()

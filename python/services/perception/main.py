@@ -98,7 +98,10 @@ def cli() -> int:
             log.debug("scene ts_ns=%d seq=%d n=%d", header.ts_ns, header.frame_seq, len(header.detections))
 
             if args.once:
-                # Default LINGER=0 would drop the single message on close.
+                # transport.pub() sets LINGER=0 by default — fine for the
+                # streaming case where missing one frame doesn't matter,
+                # but for --once mode we need a graceful drain or the
+                # one-and-only frame can vanish on close.
                 pub.setsockopt(zmq.LINGER, 500)
                 break
     finally:

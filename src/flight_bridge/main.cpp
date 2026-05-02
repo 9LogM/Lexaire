@@ -128,8 +128,21 @@ static int run() {
 
     // ZMQ: REP for tool calls, PUB for telemetry broadcast.
     void* zctx = zmq_ctx_new();
+    if (zctx == nullptr) {
+        std::fprintf(stderr, "[flight-bridge] zmq_ctx_new failed: %s\n",
+                     zmq_strerror(zmq_errno()));
+        return 6;
+    }
     void* rep  = zmq_socket(zctx, ZMQ_REP);
     void* pub  = zmq_socket(zctx, ZMQ_PUB);
+    if (rep == nullptr || pub == nullptr) {
+        std::fprintf(stderr, "[flight-bridge] zmq_socket failed: %s\n",
+                     zmq_strerror(zmq_errno()));
+        if (rep) zmq_close(rep);
+        if (pub) zmq_close(pub);
+        zmq_ctx_destroy(zctx);
+        return 6;
+    }
     int linger = 0;
     zmq_setsockopt(rep, ZMQ_LINGER, &linger, sizeof(linger));
     zmq_setsockopt(pub, ZMQ_LINGER, &linger, sizeof(linger));

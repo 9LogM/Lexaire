@@ -101,7 +101,18 @@ class YoloDetector(Detector):
             missing = [c for c in classes if c not in name_to_id]
             if missing:
                 log.warning("YoloDetector: unknown classes ignored: %s", missing)
-            self._class_filter = wanted or None
+            # Empty `wanted` after filtering means EVERY requested class
+            # was a typo/unknown. The previous `wanted or None` collapsed
+            # this to "no filter" — silently emitting all classes, the
+            # opposite of what the operator configured. Fail loud instead.
+            if not wanted:
+                known = sorted(self._model.names.values())
+                raise ValueError(
+                    "perception.detector.classes: none of the requested "
+                    f"classes match the model's label set; got {classes!r}, "
+                    f"first known labels: {known[:8]}..."
+                )
+            self._class_filter = wanted
 
     def detect(self, inp: DetectorInputs) -> list[Detection]:
         # BGR (our convention) -> RGB for ultralytics.

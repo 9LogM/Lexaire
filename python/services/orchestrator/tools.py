@@ -71,7 +71,12 @@ def tool_schemas() -> list[dict[str, Any]]:
         },
         {
             "name": "set_velocity_ned",
-            "description": "Command a NED velocity setpoint (m/s) for smooth motion.",
+            "description": (
+                "Command a NED velocity setpoint (m/s) for smooth motion. "
+                "At least one of vx/vy/vz must be set — a no-arg / all-zero "
+                "call will be rejected by the bridge to avoid silently "
+                "stopping an active autonomous mode."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,6 +86,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "yaw_rate_deg_s": {"type": "number", "description": "Yaw rate (deg/s)."},
                 },
                 "required": [],
+                "anyOf": [
+                    {"required": ["vx"]},
+                    {"required": ["vy"]},
+                    {"required": ["vz"]},
+                ],
             },
         },
         {

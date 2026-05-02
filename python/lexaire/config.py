@@ -21,17 +21,14 @@ import yaml
 
 
 class _AttrDict(dict):
-    """dict that also allows attribute access. Nested dicts are wrapped lazily."""
+    """dict that also allows attribute access. Nested dicts are wrapped
+    eagerly by `_wrap` at load time."""
 
     def __getattr__(self, name: str) -> Any:
         try:
-            v = self[name]
+            return self[name]
         except KeyError as e:
             raise AttributeError(name) from e
-        if isinstance(v, dict) and not isinstance(v, _AttrDict):
-            v = _AttrDict(v)
-            self[name] = v
-        return v
 
     def __setattr__(self, name: str, value: Any) -> None:
         self[name] = value
@@ -70,7 +67,7 @@ def _find_config_path(override: str | None) -> Path:
             return p
         raise FileNotFoundError(f"config not found: {override}")
 
-    # Walk up from cwd looking for common/config.yaml (up to 5 levels).
+    # Walk up from cwd looking for common/config.yaml (up to 6 levels).
     cur = Path.cwd()
     for _ in range(6):
         candidate = cur / "common" / "config.yaml"

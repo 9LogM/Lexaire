@@ -1,6 +1,7 @@
 #include "handlers.hpp"
 
 #include <cstdio>
+#include <optional>
 #include <string>
 
 using namespace mavsdk;
@@ -9,6 +10,32 @@ using lexaire::json;
 namespace lexaire {
 
 namespace {
+
+// `nlohmann::json::value(key, default)` returns the default when the key is
+// missing OR when the stored value can't be converted to the requested type.
+// That silently masks typos and wrong-typed args from the VLM (e.g. a
+// hallucinated "alt_m" on a takeoff would have triggered a 1.5 m takeoff
+// instead of erroring out). The helpers below give "either the value or a
+// clear error string" semantics so wrong types fail loud at the handler.
+
+// Required numeric arg. ok=false on missing OR wrong type.
+struct DoubleArg { bool ok; double value; std::string error; };
+DoubleArg require_double(const json& args, const char* key) {
+    if (!args.contains(key)) return {false, 0.0, std::string("missing:") + key};
+    const auto& v = args[key];
+    if (!v.is_number())      return {false, 0.0, std::string("wrong_type:") + key};
+    return {true, v.get<double>(), ""};
+}
+
+// Optional numeric arg. ok=true with present=false when absent (caller
+// uses default). ok=false ONLY when present-but-wrong-typed.
+struct OptDoubleArg { bool ok; bool present; double value; std::string error; };
+OptDoubleArg optional_double(const json& args, const char* key) {
+    if (!args.contains(key)) return {true, false, 0.0, ""};
+    const auto& v = args[key];
+    if (!v.is_number())      return {false, false, 0.0, std::string("wrong_type:") + key};
+    return {true, true, v.get<double>(), ""};
+}
 
 std::string action_result_to_string(Action::Result r) {
     switch (r) {
@@ -79,9 +106,10 @@ ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_takeoff(const ToolCall& c, FlightCtx& ctx) {
-    double alt = c.args.value("altitude_m", 1.5);
+    auto alt = require_double(c.args, "altitude_m");
+    if (!alt.ok) return err(c.request_id, alt.error);
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    ctx.action->set_takeoff_altitude(static_cast<float>(alt));
+    ctx.action->set_takeoff_altitude(static_cast<float>(alt.value));
     auto r = ctx.action->takeoff();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
@@ -109,13 +137,17 @@ ToolResult handle_hold(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
-    double n = c.args.value("n", 0.0);
-    double e = c.args.value("e", 0.0);
-    double d = c.args.value("d", 0.0);
-    double yaw = c.args.value("yaw_deg", 0.0);
+    auto n = require_double(c.args, "n");
+    if (!n.ok) return err(c.request_id, n.error);
+    auto e = require_double(c.args, "e");
+    if (!e.ok) return err(c.request_id, e.error);
+    auto d = require_double(c.args, "d");
+    if (!d.ok) return err(c.request_id, d.error);
+    auto yaw = optional_double(c.args, "yaw_deg");
+    if (!yaw.ok) return err(c.request_id, yaw.error);
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
-    Offboard::PositionNedYaw p{static_cast<float>(n), static_cast<float>(e),
-                                 static_cast<float>(d), static_cast<float>(yaw)};
+    Offboard::PositionNedYaw p{static_cast<float>(n.value), static_cast<float>(e.value),
+                                 static_cast<float>(d.value), static_cast<float>(yaw.value)};
     ctx.offboard->set_position_ned(p);
     auto r = ctx.offboard->start();
     if (r == Offboard::Result::Success || r == Offboard::Result::Busy) return ok(c.request_id);
@@ -123,13 +155,22 @@ ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
-    double vx = c.args.value("vx", 0.0);
-    double vy = c.args.value("vy", 0.0);
-    double vz = c.args.value("vz", 0.0);
-    double yr = c.args.value("yaw_rate_deg_s", 0.0);
+    // At least one of vx/vy/vz must be present; an all-zero/no-arg call
+    // would override an active autonomous mode with a hover setpoint.
+    auto vx = optional_double(c.args, "vx");
+    if (!vx.ok) return err(c.request_id, vx.error);
+    auto vy = optional_double(c.args, "vy");
+    if (!vy.ok) return err(c.request_id, vy.error);
+    auto vz = optional_double(c.args, "vz");
+    if (!vz.ok) return err(c.request_id, vz.error);
+    if (!vx.present && !vy.present && !vz.present) {
+        return err(c.request_id, "missing_velocity_component");
+    }
+    auto yr = optional_double(c.args, "yaw_rate_deg_s");
+    if (!yr.ok) return err(c.request_id, yr.error);
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
-    Offboard::VelocityNedYaw v{static_cast<float>(vx), static_cast<float>(vy),
-                                 static_cast<float>(vz), static_cast<float>(yr)};
+    Offboard::VelocityNedYaw v{static_cast<float>(vx.value), static_cast<float>(vy.value),
+                                 static_cast<float>(vz.value), static_cast<float>(yr.value)};
     ctx.offboard->set_velocity_ned(v);
     auto r = ctx.offboard->start();
     if (r == Offboard::Result::Success || r == Offboard::Result::Busy) return ok(c.request_id);

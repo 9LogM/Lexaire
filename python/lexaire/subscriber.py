@@ -115,7 +115,11 @@ class SensorSubscriber:
                 try:
                     hdr_bytes, payload = sock.recv_multipart(copy=False)
                     hdr = msg.decode_header(bytes(hdr_bytes))
-                    img = np.asarray(Image.open(io.BytesIO(bytes(payload))).convert("RGB"))
+                    # Context-managed open so PIL's lazy-load resources are
+                    # released eagerly under sustained ingest. The asarray
+                    # copy below is what keeps the pixels alive after close.
+                    with Image.open(io.BytesIO(bytes(payload))) as im:
+                        img = np.asarray(im.convert("RGB"))
                     bgr = img[..., ::-1].copy()
                 except Exception as e:
                     log.warning("rgb decode error: %s", e)
@@ -140,7 +144,12 @@ class SensorSubscriber:
                     hdr_bytes, payload = sock.recv_multipart(copy=False)
                     hdr = msg.decode_header(bytes(hdr_bytes))
                     raw = self._zdecomp.decompress(bytes(payload))
-                    depth = np.frombuffer(raw, dtype="<u2").reshape(hdr["h"], hdr["w"])
+                    # np.frombuffer returns a read-only view; .copy() so
+                    # downstream consumers can mask invalid pixels in place
+                    # (perception's depth-patch median already does so).
+                    depth = (np.frombuffer(raw, dtype="<u2")
+                             .reshape(hdr["h"], hdr["w"])
+                             .copy())
                 except Exception as e:
                     log.warning("depth decode error: %s", e)
                     continue
@@ -186,12 +195,29 @@ class SensorSubscriber:
         for seq in common:
             rgb_hdr, rgb = self._rgb_buf.pop(seq)
             depth_hdr, depth = self._depth_buf.pop(seq)
+            # depth_scale_m converts the uint16 depth raster to meters.
+            # The previous `or 0.0` swallowed both "missing" and "literally
+            # zero" — downstream meters math becomes 0 silently. Treat
+            # missing as 0.0 (which detector.py interprets as "no depth")
+            # but log so the publisher misconfig is visible.
+            scale_raw = depth_hdr.get("depth_scale_m")
+            if scale_raw is None:
+                if not getattr(self, "_warned_missing_depth_scale", False):
+                    log.warning(
+                        "depth header missing depth_scale_m; "
+                        "depth-derived xyz/distances will be 0 until the "
+                        "publisher emits this field"
+                    )
+                    self._warned_missing_depth_scale = True
+                depth_scale_m = 0.0
+            else:
+                depth_scale_m = float(scale_raw)
             out.append(Frameset(
                 ts_ns=int(rgb_hdr["ts_ns"]),
                 seq=seq,
                 rgb=rgb,
                 depth=depth,
-                depth_scale_m=float(depth_hdr.get("depth_scale_m") or 0.0),
+                depth_scale_m=depth_scale_m,
                 intrinsics=rgb_hdr["intrinsics"],
             ))
         return out
