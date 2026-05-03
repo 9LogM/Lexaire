@@ -80,9 +80,8 @@ static int run() {
     // a freshness window.
     sdk.intercept_incoming_messages_async(
         [&last_gcs_hb_ms](mavlink_message_t& msg) -> bool {
-            // Skip during shutdown — a post-stop write would let the
-            // telemetry thread publish one final frame with stale
-            // qgc_connected=true.
+            // Skip during shutdown — otherwise the telemetry thread
+            // emits one last frame with stale qgc_connected=true.
             if (stop_requested()) return true;
             if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
                 mavlink_heartbeat_t hb;
