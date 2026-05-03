@@ -92,12 +92,8 @@ ToolResult err(const std::string& req, const std::string& msg) {
 // ---- Individual handlers ----
 
 // Common body for arg-less Action plugin calls (arm/disarm/land/RTL/hold).
-// Each handler used to be a 6-line clone differing only by the method
-// pointer; this collapses the body into one place. Wrapping with one
-// thin handler per tool name (rather than a function template) keeps
-// the dispatch table's value type uniform (`ToolResult(*)(...)`) and
-// avoids surprises with member-function-pointer template args inside
-// the anonymous namespace.
+// One thin handler per tool name (rather than a function template) keeps
+// the dispatch table's value type uniform: `ToolResult(*)(...)`.
 ToolResult call_action_method(const ToolCall& c, FlightCtx& ctx,
                                 Action::Result (Action::*method)() const) {
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
@@ -202,11 +198,9 @@ ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     if (name.empty()) return err(c.request_id, "missing_param_name");
     if (!ctx.param) return err(c.request_id, "param_not_initialized");
 
-    // Pass-14 added require_double / optional_double for the offboard
-    // handlers; set_param was missed. Use the same explicit type-check
-    // here — a hallucinated `"int_value": "5"` would otherwise default
-    // to 0 and silently zero a flight param via `value()`'s lossy
-    // coerce-on-mismatch behavior.
+    // Use the typed helpers — a hallucinated `"int_value": "5"` would
+    // otherwise coerce to 0 via `args.value()` and silently zero the
+    // flight param.
     if (c.args.contains("int_value")) {
         auto v = require_double(c.args, "int_value");
         if (!v.ok) return err(c.request_id, v.error);

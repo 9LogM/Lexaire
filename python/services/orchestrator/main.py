@@ -354,8 +354,7 @@ class Orchestrator:
         max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))
         mission = OrchestratorMission(goal_text=cmd.text, started_ts_ns=now_ns())
         # decision_count bounds VLM calls; mission.current_step counts
-        # individual tool calls (a VLM batch of N tool calls used to chew
-        # N steps from this budget, which made the field name lie).
+        # individual tool calls in a batch.
         decision_count = 0
         terminal_call: Optional[str] = None
         stuck = False

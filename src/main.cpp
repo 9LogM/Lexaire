@@ -443,14 +443,9 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 5: {
-                // Force-redeploy of the relay on the Pi. Useful when
-                // relay/ scripts changed locally and you want them picked
-                // up, or when the running relay container has gone wedged.
-                //
-                // Re-entry guard mirrors case 6: deploy is async on the
-                // io_context, so a second press while one is in flight
-                // would spawn a parallel SSH session racing for the same
-                // remote build context.
+                // Re-entry guard: deploy is async on the io_context, so
+                // a second press while one is in flight would spawn a
+                // parallel SSH session racing for the same build context.
                 if (ctx.relay_state == ServiceState::Deploying) {
                     ctx.sub_content =
                         "  RESTART RELAY\n\n"
@@ -469,14 +464,10 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 6: {
-                // Force-redeploy of the sensor publisher. Mirrors case 5
-                // but invokes pi-setup/deploy-publisher.sh, which is
-                // smart-build aware — skips `--build` when origin/HEAD
-                // didn't move.
-                //
-                // Re-entry guard: deploy is async on the io_context, so a
-                // second press while one is in flight would race for the
-                // same ~/lexaire-publisher checkout on the Pi.
+                // deploy-publisher.sh is smart-build aware — skips
+                // `--build` when origin/HEAD didn't move. Re-entry guard
+                // as in case 5; a second press would race the same
+                // ~/lexaire-publisher checkout on the Pi.
                 if (ctx.publisher_state == ServiceState::Deploying) {
                     ctx.sub_content =
                         "  RESTART PUBLISHER\n\n"
@@ -507,9 +498,6 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 7: {
-                // Rebuild and restart the local GCS stack containers
-                // (perception, orchestrator, flight-bridge). Picks up
-                // code changes without dropping to the host shell.
                 if (ctx.stack_state == ServiceState::Deploying) {
                     ctx.sub_content =
                         "  RESTART GCS STACK\n\n"
@@ -597,9 +585,8 @@ static ServiceState exit_to_state(int exit_code) {
     return ServiceState::Unknown;
 }
 
-// Bash scripts in pi-setup/ are piped over SSH from the GCS, mirroring how
-// pi-setup/setup-ap.sh is invoked. Keeps deploy logic in shell where it's
-// easy to read/audit/test, and the C++ side just shells out.
+// Bash scripts in pi-setup/ are piped over SSH from the GCS, mirroring
+// pi-setup/setup-ap.sh.
 
 // `publisher_repo` comes from operator-editable YAML and gets interpolated
 // into a single-quoted shell argument. A literal "'" in the URL would
@@ -739,10 +726,9 @@ static void ensure_relay_running(AppContext& ctx) {
 }
 
 static void refresh_stack_state(AppContext& ctx) {
-    // `docker ps --filter name=A --filter name=B --filter name=C` is OR,
-    // not AND — the previous one-shot query reported Up whenever ANY of
-    // the three GCS containers was running. Run the query per-container
-    // and fail early if any one is missing or the daemon's unreachable.
+    // `docker ps --filter name=A --filter name=B` is OR, not AND, so a
+    // single multi-filter query would report Up whenever ANY of the three
+    // is running. Loop per-container and fail-fast on missing/unreachable.
     // Exit codes match ps_query_shell's contract: 0 Up / 1 Down / 2 Unknown.
     std::string cmd =
         " for n in lexaire-perception lexaire-orchestrator lexaire-flight-bridge; do"
