@@ -35,7 +35,11 @@ def cli() -> int:
     cfg = load_config(args.config)
     log = logs.configure("perception", cfg.get("logging.level", "INFO"))
 
-    tick_hz = float(cfg.get("perception.tick_hz", 2.0))
+    # Clamp tick_hz: 0 would divide-by-zero below; negative is meaningless.
+    raw_tick = float(cfg.get("perception.tick_hz", 2.0))
+    tick_hz = max(raw_tick, 0.1)
+    if tick_hz != raw_tick:
+        log.warning("perception.tick_hz=%.2f clamped to %.2f", raw_tick, tick_hz)
     scene_pub_ep = cfg.require("services.perception_scene_pub")
 
     detector = build_detector(cfg)
@@ -61,6 +65,11 @@ def cli() -> int:
     interval_s = 1.0 / tick_hz
     last_tick = 0.0
     latest_fs = None
+    latest_fs_ts = 0.0  # monotonic at write
+    # Without this gate, scene detections keep flowing with a frozen
+    # frame_seq after the publisher dies (mirrors the orchestrator's
+    # frame_max_age_s on its own RGB path).
+    frame_max_age_s = float(cfg.get("perception.frame_max_age_s", 2.0))
     # --once bails after 10s with no frame so a missing publisher
     # doesn't hang CI runs.
     once_deadline = time.monotonic() + 10.0 if args.once else None
@@ -72,6 +81,7 @@ def cli() -> int:
             fs = sub.get_nowait()
             while fs is not None:
                 latest_fs = fs
+                latest_fs_ts = time.monotonic()
                 fs = sub.get_nowait()
 
             now = time.monotonic()
@@ -84,6 +94,8 @@ def cli() -> int:
             last_tick = now
 
             if latest_fs is None:
+                continue
+            if now - latest_fs_ts > frame_max_age_s:
                 continue
 
             inp = DetectorInputs(

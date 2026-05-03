@@ -548,10 +548,18 @@ class Orchestrator:
     def _ensure_req_socket(self) -> zmq.Socket:
         if self._req_socket is None:
             s = self._zmq.socket(zmq.REQ)
-            s.setsockopt(zmq.LINGER, 0)
-            s.setsockopt(zmq.RCVTIMEO, 3000)
-            s.setsockopt(zmq.SNDTIMEO, 3000)
-            s.connect(self.flight_req_endpoint)
+            try:
+                s.setsockopt(zmq.LINGER, 0)
+                s.setsockopt(zmq.RCVTIMEO, 3000)
+                s.setsockopt(zmq.SNDTIMEO, 3000)
+                s.connect(self.flight_req_endpoint)
+            except Exception:
+                # Close the half-built socket on partial-construction failure.
+                try:
+                    s.close(linger=0)
+                except Exception:
+                    pass
+                raise
             self._req_socket = s
         return self._req_socket
 

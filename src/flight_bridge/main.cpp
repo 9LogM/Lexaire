@@ -80,6 +80,10 @@ static int run() {
     // a freshness window.
     sdk.intercept_incoming_messages_async(
         [&last_gcs_hb_ms](mavlink_message_t& msg) -> bool {
+            // Skip during shutdown — a post-stop write would let the
+            // telemetry thread publish one final frame with stale
+            // qgc_connected=true.
+            if (stop_requested()) return true;
             if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
                 mavlink_heartbeat_t hb;
                 mavlink_msg_heartbeat_decode(&msg, &hb);
@@ -250,6 +254,9 @@ static int run() {
             t.yaw_deg = a.yaw_deg;
             auto v = ctx.telemetry->velocity_ned();
             t.ground_speed_mps = std::sqrt(v.north_m_s * v.north_m_s + v.east_m_s * v.east_m_s);
+            // Recheck so a SIGINT mid-iteration doesn't publish one
+            // post-stop frame.
+            if (stop_requested()) break;
             std::string payload = t.to_json().dump();
             zmq_send(pub, payload.data(), payload.size(), 0);
             std::this_thread::sleep_for(100ms);
