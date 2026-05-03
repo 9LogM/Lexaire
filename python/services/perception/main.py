@@ -61,6 +61,9 @@ def cli() -> int:
     interval_s = 1.0 / tick_hz
     last_tick = 0.0
     latest_fs = None
+    # --once bails after 10s with no frame so a missing publisher
+    # doesn't hang CI runs.
+    once_deadline = time.monotonic() + 10.0 if args.once else None
 
     try:
         while not stop:
@@ -69,6 +72,9 @@ def cli() -> int:
                 latest_fs = fs
 
             now = time.monotonic()
+            if once_deadline is not None and latest_fs is None and now >= once_deadline:
+                log.error("--once: no frame from publisher within 10s; exiting")
+                return 2
             if now - last_tick < interval_s:
                 time.sleep(min(interval_s - (now - last_tick), 0.05))
                 continue

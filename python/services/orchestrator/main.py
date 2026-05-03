@@ -415,7 +415,10 @@ class Orchestrator:
             offline = False
             stuck = False
             for i, tc in enumerate(decision.tool_calls):
-                if self.stop_event.is_set():
+                if self.stop_event.is_set() or self._preempt_event.is_set():
+                    self._record_skipped(mission, decision.tool_calls[i:],
+                                         "skipped:preempted")
+                    preempted = True
                     break
                 result = self._dispatch_tool_call(tc)
                 mission.record(tc.name, dict(tc.args or {}), result)
@@ -448,7 +451,7 @@ class Orchestrator:
                     terminal_call = tc.name
                     break
 
-            if terminal_call is not None or offline or stuck:
+            if terminal_call is not None or offline or stuck or preempted:
                 break
 
         # Order matters: stop_event takes precedence over the no-flags
@@ -554,15 +557,12 @@ class Orchestrator:
                                   f"refusing {tc.name}: prior dispatch timed out")
             return ToolResult(request_id=tc.request_id, ok=False, error="bridge_offline")
 
-        # The bridge's safety gate at safety.hpp accepts an arm only when
-        # args.voice_confirmed is set. Set it ONLY when the user's
-        # current voice command actually contained an arm intent — see
-        # _arm_pattern set in __init__ and authorized in _on_command.
-        # Without this guard a VLM-emitted arm during any unrelated
-        # utterance defeats the gate.
+        # voice_confirmed is the orchestrator's authoritative signal —
+        # overwrite unconditionally on arm so a VLM-hallucinated value
+        # can't bypass the bridge's spoken-arm gate.
         args = dict(tc.args) if tc.args else {}
-        if tc.name == "arm" and self._current_arm_authorized:
-            args["voice_confirmed"] = True
+        if tc.name == "arm":
+            args["voice_confirmed"] = self._current_arm_authorized
 
         req = self._ensure_req_socket()
         try:

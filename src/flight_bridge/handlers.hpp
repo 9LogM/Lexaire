@@ -9,7 +9,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 
 #include <mavsdk/mavsdk.h>
 #include <mavsdk/system.h>

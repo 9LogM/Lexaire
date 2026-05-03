@@ -65,6 +65,10 @@ static int run() {
     lexaire::FlightCtx ctx;
     ctx.safety = &state;
 
+    // Declared before sdk so it outlives sdk's message thread — the
+    // intercept lambda below captures it by reference.
+    std::atomic<std::int64_t> last_gcs_hb_ms{0};
+
     // PX4 only routes STATUSTEXT to peers whose heartbeat advertises
     // MAV_TYPE_GCS. The bridge is the pilot's interface — voice → tool
     // calls — so GCS is the correct identity.
@@ -74,7 +78,6 @@ static int run() {
     // MAVSDK only enumerates autopilots, so GCS heartbeats are caught off
     // the raw stream; the telemetry thread reads `last_gcs_hb_ms` against
     // a freshness window.
-    std::atomic<std::int64_t> last_gcs_hb_ms{0};
     sdk.intercept_incoming_messages_async(
         [&last_gcs_hb_ms](mavlink_message_t& msg) -> bool {
             if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {

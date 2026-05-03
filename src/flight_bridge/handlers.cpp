@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 using namespace mavsdk;
 using lexaire::json;

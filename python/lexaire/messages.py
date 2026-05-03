@@ -71,7 +71,9 @@ class ToolResult:
 @dataclass
 class OrchestratorStatus:
     ts_ns: int
-    state: str                       # "idle" | "thinking" | "executing" | "aborted" | "bridge_offline" | "vlm_error"
+    # "idle" | "thinking" | "executing" | "aborted" | "abort_failed"
+    #  | "bridge_offline" | "vlm_error"
+    state: str
     last_thought: str = ""
 
 

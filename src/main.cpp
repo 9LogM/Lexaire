@@ -605,7 +605,7 @@ static std::string shell_squote(const std::string& s) {
 
 static std::string publisher_deploy_cmd(const AppContext& ctx) {
     return std::string("ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new ")
-        + ctx.drone_host
+        + "'" + shell_squote(ctx.drone_host) + "'"
         + " 'bash -s -- " + shell_squote(ctx.publisher_repo) + "'"
         + " < " + PI_SETUP_DIR + "/deploy-publisher.sh"
         + " >>" + TUI_LOG_PATH + " 2>&1";
@@ -616,8 +616,8 @@ static std::string publisher_deploy_cmd(const AppContext& ctx) {
 // natively. Used by both the startup auto-deploy (ensure_relay_running)
 // and the menu-triggered redeploy (case 5).
 static std::string relay_deploy_cmd(const AppContext& ctx) {
-    return "DOCKER_HOST=ssh://" + ctx.drone_host
-        + " SERIAL_DEVICE=" + ctx.serial_device
+    return "DOCKER_HOST='ssh://" + shell_squote(ctx.drone_host) + "'"
+        + " SERIAL_DEVICE='" + shell_squote(ctx.serial_device) + "'"
         + " SERIAL_BAUD=" + std::to_string(ctx.serial_baud)
         + " docker compose -f relay/docker-compose.yaml up -d --build"
         + " >>" + TUI_LOG_PATH + " 2>&1";
@@ -655,7 +655,7 @@ static void run_deploy(AppContext& ctx,
 
 static std::string publisher_check_cmd(const AppContext& ctx) {
     return std::string("ssh -o BatchMode=yes -o ConnectTimeout=5 ")
-        + ctx.drone_host
+        + "'" + shell_squote(ctx.drone_host) + "'"
         + " 'bash -s'"
         + " < " + PI_SETUP_DIR + "/check-publisher.sh"
         + " >>" + TUI_LOG_PATH + " 2>&1";
@@ -696,7 +696,7 @@ static void ensure_publisher_running(AppContext& ctx) {
 
 static void ensure_relay_running(AppContext& ctx) {
     std::string check_cmd = ps_query_shell(
-        "DOCKER_HOST=ssh://" + ctx.drone_host,
+        "DOCKER_HOST='ssh://" + shell_squote(ctx.drone_host) + "'",
         "--filter name=lexaire-relay");
     boost::process::async_system(
         ctx.io,

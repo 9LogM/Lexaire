@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 // Flat view of the bridge's telemetry payload. Populated by ServicesWatcher
 // from the telemetry PUB; rendered by the header and Live telemetry monitor.
 
