@@ -81,7 +81,8 @@ std::string summarize_telemetry(const std::string& header) {
             ss << " / " << j["rel_alt_m"].get<double>() << " m";
         }
         if (j.contains("battery_pct") && !j["battery_pct"].is_null()) {
-            ss << " / " << j["battery_pct"].get<int>() << "%";
+            // get<double>() tolerates both int and float without throwing.
+            ss << " / " << static_cast<int>(j["battery_pct"].get<double>()) << "%";
         }
         return ss.str();
     } catch (...) {
@@ -107,7 +108,7 @@ void parse_telemetry(const std::string& header, TelemetrySnapshot& out) {
         const bool has_pct = j.contains("battery_pct") && !j["battery_pct"].is_null();
         const bool has_v   = j.contains("battery_v")   && !j["battery_v"].is_null();
         out.has_battery = has_pct || has_v;
-        if (has_pct) out.battery_pct = j["battery_pct"].get<int>();
+        if (has_pct) out.battery_pct = static_cast<int>(j["battery_pct"].get<double>());
         if (has_v)   out.battery_v   = j["battery_v"].get<float>();
 
         if (j.contains("lat") && !j["lat"].is_null() &&

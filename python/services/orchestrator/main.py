@@ -602,15 +602,23 @@ class Orchestrator:
             self._publish_status("bridge_offline",
                                   f"{tc.name} timed out — bridge unreachable")
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
-        except (zmq.ZMQError, ValueError, TypeError) as e:
-            # Wedged REQ / partial recv / malformed JSON / non-dict reply.
+        except zmq.ZMQError as e:
+            # Transport-level failure (wedged REQ state, ENOTCONN, ...).
             # Flag offline so the next dispatch short-circuits at the gate.
-            self.log.warning("tool %s wire error: %r", tc.name, e)
+            self.log.warning("tool %s zmq error: %r", tc.name, e)
             self._reset_req_socket()
             with self._bridge_lock:
                 self._bridge_offline_flag = True
             self._publish_status("bridge_offline",
-                                  f"{tc.name} wire error: {e!r}")
+                                  f"{tc.name} zmq error: {e!r}")
+            return ToolResult(
+                request_id=tc.request_id, ok=False, error=f"wire_error: {e!r}"
+            )
+        except (ValueError, TypeError) as e:
+            # Bridge replied — just garbled. Reset REQ state but don't
+            # flag offline; the next dispatch should try again.
+            self.log.warning("tool %s parse error: %r", tc.name, e)
+            self._reset_req_socket()
             return ToolResult(
                 request_id=tc.request_id, ok=False, error=f"wire_error: {e!r}"
             )

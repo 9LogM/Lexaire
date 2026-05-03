@@ -64,7 +64,13 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "n": {"type": "number", "description": "North offset, meters."},
                     "e": {"type": "number", "description": "East offset, meters."},
                     "d": {"type": "number", "description": "Down offset, meters (negative = above)."},
-                    "yaw_deg": {"type": "number", "description": "Heading, deg."},
+                    "yaw_deg": {
+                        "type": "number",
+                        "description": (
+                            "Absolute heading in degrees (0=North, CW positive). "
+                            "Omit to hold current heading."
+                        ),
+                    },
                 },
                 "required": ["n", "e", "d"],
             },
@@ -83,7 +89,13 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "vx": {"type": "number", "description": "North velocity (m/s)."},
                     "vy": {"type": "number", "description": "East velocity (m/s)."},
                     "vz": {"type": "number", "description": "Down velocity (m/s); negative = ascend."},
-                    "yaw_rate_deg_s": {"type": "number", "description": "Yaw rate (deg/s)."},
+                    "yaw_deg": {
+                        "type": "number",
+                        "description": (
+                            "Absolute heading in degrees (0=North, CW positive). "
+                            "Omit to hold current heading."
+                        ),
+                    },
                 },
                 "required": [],
                 "anyOf": [

@@ -129,8 +129,13 @@ ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
     auto yaw = optional_double(c.args, "yaw_deg");
     if (!yaw.ok) return err(c.request_id, yaw.error);
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
+    // PositionNedYaw has no "hold heading" sentinel — an absent yaw_deg
+    // without this default snaps to 0° (north) on every translate.
+    float yaw_deg = yaw.present
+        ? static_cast<float>(yaw.value)
+        : (ctx.telemetry ? ctx.telemetry->attitude_euler().yaw_deg : 0.0f);
     Offboard::PositionNedYaw p{static_cast<float>(n.value), static_cast<float>(e.value),
-                                 static_cast<float>(d.value), static_cast<float>(yaw.value)};
+                                 static_cast<float>(d.value), yaw_deg};
     ctx.offboard->set_position_ned(p);
     auto r = ctx.offboard->start();
     if (r == Offboard::Result::Success || r == Offboard::Result::Busy) return ok(c.request_id);
@@ -152,11 +157,15 @@ ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
     if (!vx.present && !vy.present && !vz.present) {
         return err(c.request_id, "missing_velocity_component");
     }
-    auto yr = optional_double(c.args, "yaw_rate_deg_s");
-    if (!yr.ok) return err(c.request_id, yr.error);
+    auto yaw = optional_double(c.args, "yaw_deg");
+    if (!yaw.ok) return err(c.request_id, yaw.error);
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
+    // Default heading to current yaw when absent — see handle_goto_ned.
+    float yaw_deg = yaw.present
+        ? static_cast<float>(yaw.value)
+        : (ctx.telemetry ? ctx.telemetry->attitude_euler().yaw_deg : 0.0f);
     Offboard::VelocityNedYaw v{static_cast<float>(vx.value), static_cast<float>(vy.value),
-                                 static_cast<float>(vz.value), static_cast<float>(yr.value)};
+                                 static_cast<float>(vz.value), yaw_deg};
     ctx.offboard->set_velocity_ned(v);
     auto r = ctx.offboard->start();
     if (r == Offboard::Result::Success || r == Offboard::Result::Busy) return ok(c.request_id);

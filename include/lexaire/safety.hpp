@@ -46,12 +46,15 @@ inline SafetyDecision check_tool(const std::string& name,
                                   const SafetyEnvelope& env,
                                   const SafetyState& state) {
     // Tools that must reach the bridge even when the abort latch is set:
+    //   abort       — idempotent (Action::land() on a landing drone is a
+    //                 no-op); a double-press from the operator must not
+    //                 surface as abort_failed.
     //   kill / land — the strictly-worse escalations of abort.
     //   disarm      — the operator's "I'm done, clear the latch" path; if
     //                 we deny it, the latch never clears (the dispatch's
     //                 on-success clear runs only when the gate passes).
     const bool is_emergency_followup =
-        (name == "kill" || name == "land" || name == "disarm");
+        (name == "abort" || name == "kill" || name == "land" || name == "disarm");
     if (state.aborted.load() && !is_emergency_followup) {
         return {false, "abort_active"};
     }
@@ -81,6 +84,8 @@ inline SafetyDecision check_tool(const std::string& name,
     if (name == "takeoff") {
         auto alt = as_d("altitude_m", 0.0);
         if (!alt) return {false, "wrong_type:altitude_m"};
+        if (*alt <= 0.0)
+            return {false, "altitude_non_positive"};
         if (*alt > env.max_altitude_m)
             return {false, "altitude_exceeds_max"};
     }
@@ -92,6 +97,9 @@ inline SafetyDecision check_tool(const std::string& name,
         if (args.contains("d")) {
             auto d = as_d("d");
             if (!d) return {false, "wrong_type:d"};
+            // d is "down from home", so positive d is below ground level.
+            if (*d > 0.0)
+                return {false, "altitude_below_home"};
             double rel_alt = -*d;
             if (rel_alt > env.max_altitude_m)
                 return {false, "altitude_exceeds_max"};
