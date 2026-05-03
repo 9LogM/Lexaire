@@ -1,5 +1,5 @@
 """
-YAML config loader with dot-notation access and env-var resolution.
+YAML config loader with dot-notation access.
 
 Usage:
     cfg = load_config()           # finds common/config.yaml from cwd or repo root
@@ -7,8 +7,11 @@ Usage:
     cfg.perception.vlm.provider   # -> "gemini"
     cfg.get("safety.max_altitude_m", default=5.0)
 
-API keys and other secrets live in a gitignored .env file in the repo root.
-Fields whose name ends in `_env` are resolved to os.environ[value] before use.
+The loader also walks up to find a `.env` file and populates `os.environ`
+without overwriting existing values. Fields whose name ends in `_env`
+(e.g. `perception.vlm.api_key_env`) hold the env-var name; the consumer
+reads `os.environ[<value>]` itself — there is no automatic resolution
+at load time.
 """
 
 from __future__ import annotations

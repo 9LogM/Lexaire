@@ -232,28 +232,6 @@ ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     return err(c.request_id, "missing_value");
 }
 
-ToolResult handle_get_telemetry(const ToolCall& c, FlightCtx& ctx) {
-    if (!ctx.telemetry) return err(c.request_id, "telemetry_not_initialized");
-    auto pos = ctx.telemetry->position();
-    auto att = ctx.telemetry->attitude_euler();
-    auto vel = ctx.telemetry->velocity_ned();
-    json data = {
-        {"lat", pos.latitude_deg},
-        {"lon", pos.longitude_deg},
-        {"abs_alt_m", pos.absolute_altitude_m},
-        {"rel_alt_m", pos.relative_altitude_m},
-        {"roll_deg", att.roll_deg},
-        {"pitch_deg", att.pitch_deg},
-        {"yaw_deg", att.yaw_deg},
-        {"vn_mps", vel.north_m_s},
-        {"ve_mps", vel.east_m_s},
-        {"vd_mps", vel.down_m_s},
-        {"armed", ctx.telemetry->armed()},
-        {"flight_mode", flight_mode_to_string(ctx.telemetry->flight_mode())},
-    };
-    return ok(c.request_id, std::move(data));
-}
-
 // Seeds a zero-velocity setpoint and enters OFFBOARD. MAVSDK keeps the
 // setpoint streaming at ~50 Hz from here. Returns immediately; PX4 needs
 // roughly a second of streamed setpoints before it'll accept a follow-up
@@ -324,7 +302,6 @@ ToolResult dispatch(const ToolCall& call, FlightCtx& ctx) {
         {"set_velocity_ned",  &handle_set_velocity_ned},
         {"abort",             &handle_abort},
         {"kill",              &handle_kill},
-        {"get_telemetry",     &handle_get_telemetry},
         {"set_param",         &handle_set_param},
         {"get_param",         &handle_get_param},
         {"get_health",        &handle_get_health},

@@ -167,7 +167,6 @@ else
     else
         for port in $CHANNEL_PORTS; do
             if (exec 3<>"/dev/tcp/$HOST/$port") 2>/dev/null; then
-                exec 3<&-; exec 3>&-
                 ok "sensor publisher port $port open on $HOST"
             else
                 warn "sensor publisher port $port not reachable on $HOST ($PUBLISHER_HINT)"

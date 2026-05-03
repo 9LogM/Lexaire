@@ -73,9 +73,9 @@ def tool_schemas() -> list[dict[str, Any]]:
             "name": "set_velocity_ned",
             "description": (
                 "Command a NED velocity setpoint (m/s) for smooth motion. "
-                "At least one of vx/vy/vz must be set — a no-arg / all-zero "
-                "call will be rejected by the bridge to avoid silently "
-                "stopping an active autonomous mode."
+                "At least one of vx/vy/vz must be set — the bridge rejects "
+                "a no-arg call to avoid silently stopping an active "
+                "autonomous mode. {vx:0, vy:0, vz:0} is a legitimate hover."
             ),
             "parameters": {
                 "type": "object",
