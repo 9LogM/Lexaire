@@ -121,11 +121,12 @@ class SensorSubscriber:
                     with Image.open(io.BytesIO(bytes(payload))) as im:
                         img = np.asarray(im.convert("RGB"))
                     bgr = img[..., ::-1].copy()
+                    seq = int(hdr["seq"])
                 except Exception as e:
                     log.warning("rgb decode error: %s", e)
                     continue
                 with self._new_frame:
-                    self._rgb_buf[int(hdr["seq"])] = (hdr, bgr)
+                    self._rgb_buf[seq] = (hdr, bgr)
                     self._trim_locked(self._rgb_buf)
                     self._new_frame.notify()
         finally:
@@ -144,17 +145,17 @@ class SensorSubscriber:
                     hdr_bytes, payload = sock.recv_multipart(copy=False)
                     hdr = msg.decode_header(bytes(hdr_bytes))
                     raw = self._zdecomp.decompress(bytes(payload))
-                    # np.frombuffer returns a read-only view; .copy() so
-                    # downstream consumers can mask invalid pixels in place
-                    # (perception's depth-patch median already does so).
+                    # frombuffer returns a read-only view; .copy() makes
+                    # it writable for in-place masking by consumers.
                     depth = (np.frombuffer(raw, dtype="<u2")
                              .reshape(hdr["h"], hdr["w"])
                              .copy())
+                    seq = int(hdr["seq"])
                 except Exception as e:
                     log.warning("depth decode error: %s", e)
                     continue
                 with self._new_frame:
-                    self._depth_buf[int(hdr["seq"])] = (hdr, depth)
+                    self._depth_buf[seq] = (hdr, depth)
                     self._trim_locked(self._depth_buf)
                     self._new_frame.notify()
         finally:
@@ -195,29 +196,31 @@ class SensorSubscriber:
         for seq in common:
             rgb_hdr, rgb = self._rgb_buf.pop(seq)
             depth_hdr, depth = self._depth_buf.pop(seq)
-            # depth_scale_m converts the uint16 depth raster to meters.
-            # The previous `or 0.0` swallowed both "missing" and "literally
-            # zero" — downstream meters math becomes 0 silently. Treat
-            # missing as 0.0 (which detector.py interprets as "no depth")
-            # but log so the publisher misconfig is visible.
-            scale_raw = depth_hdr.get("depth_scale_m")
-            if scale_raw is None:
-                if not getattr(self, "_warned_missing_depth_scale", False):
-                    log.warning(
-                        "depth header missing depth_scale_m; "
-                        "depth-derived xyz/distances will be 0 until the "
-                        "publisher emits this field"
-                    )
-                    self._warned_missing_depth_scale = True
-                depth_scale_m = 0.0
-            else:
-                depth_scale_m = float(scale_raw)
-            out.append(Frameset(
-                ts_ns=int(rgb_hdr["ts_ns"]),
-                seq=seq,
-                rgb=rgb,
-                depth=depth,
-                depth_scale_m=depth_scale_m,
-                intrinsics=rgb_hdr["intrinsics"],
-            ))
+            try:
+                # depth_scale_m: missing is 0.0 (detector.py reads that as
+                # "no depth"), literal 0.0 also valid; warn once on missing.
+                scale_raw = depth_hdr.get("depth_scale_m")
+                if scale_raw is None:
+                    if not getattr(self, "_warned_missing_depth_scale", False):
+                        log.warning(
+                            "depth header missing depth_scale_m; "
+                            "depth-derived xyz/distances will be 0 until the "
+                            "publisher emits this field"
+                        )
+                        self._warned_missing_depth_scale = True
+                    depth_scale_m = 0.0
+                else:
+                    depth_scale_m = float(scale_raw)
+                out.append(Frameset(
+                    ts_ns=int(rgb_hdr["ts_ns"]),
+                    seq=seq,
+                    rgb=rgb,
+                    depth=depth,
+                    depth_scale_m=depth_scale_m,
+                    intrinsics=rgb_hdr["intrinsics"],
+                ))
+            except (KeyError, ValueError, TypeError) as e:
+                # One malformed header shouldn't kill the matcher thread —
+                # drop the seq, log, keep matching subsequent frames.
+                log.warning("matcher skipping seq=%d: %s", seq, e)
         return out

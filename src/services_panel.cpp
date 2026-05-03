@@ -93,37 +93,43 @@ std::string summarize_telemetry(const std::string& header) {
 // rather than zero.
 void parse_telemetry(const std::string& header, TelemetrySnapshot& out) {
     out = TelemetrySnapshot{};
-    auto j = nlohmann::json::parse(header, nullptr, /*allow_exceptions*/ false);
-    if (!j.is_object()) return;
+    // .get<T>() still throws type_error on field-type drift even with
+    // allow_exceptions=false on parse().
+    try {
+        auto j = nlohmann::json::parse(header, nullptr, /*allow_exceptions*/ false);
+        if (!j.is_object()) return;
 
-    out.connected     = j.value("connected",     false);
-    out.qgc_connected = j.value("qgc_connected", false);
-    out.armed         = j.value("armed",         false);
-    out.flight_mode   = j.value("flight_mode",   std::string{"N/A"});
+        out.connected     = j.value("connected",     false);
+        out.qgc_connected = j.value("qgc_connected", false);
+        out.armed         = j.value("armed",         false);
+        out.flight_mode   = j.value("flight_mode",   std::string{"N/A"});
 
-    const bool has_pct = j.contains("battery_pct") && !j["battery_pct"].is_null();
-    const bool has_v   = j.contains("battery_v")   && !j["battery_v"].is_null();
-    out.has_battery = has_pct || has_v;
-    if (has_pct) out.battery_pct = j["battery_pct"].get<int>();
-    if (has_v)   out.battery_v   = j["battery_v"].get<float>();
+        const bool has_pct = j.contains("battery_pct") && !j["battery_pct"].is_null();
+        const bool has_v   = j.contains("battery_v")   && !j["battery_v"].is_null();
+        out.has_battery = has_pct || has_v;
+        if (has_pct) out.battery_pct = j["battery_pct"].get<int>();
+        if (has_v)   out.battery_v   = j["battery_v"].get<float>();
 
-    if (j.contains("lat") && !j["lat"].is_null() &&
-        j.contains("lon") && !j["lon"].is_null()) {
-        out.has_fix   = true;
-        out.latitude  = j["lat"].get<double>();
-        out.longitude = j["lon"].get<double>();
+        if (j.contains("lat") && !j["lat"].is_null() &&
+            j.contains("lon") && !j["lon"].is_null()) {
+            out.has_fix   = true;
+            out.latitude  = j["lat"].get<double>();
+            out.longitude = j["lon"].get<double>();
+        }
+        if (j.contains("abs_alt_m") && !j["abs_alt_m"].is_null()) {
+            out.abs_alt_m = j["abs_alt_m"].get<float>();
+        }
+        if (j.contains("rel_alt_m") && !j["rel_alt_m"].is_null()) {
+            out.rel_alt_m = j["rel_alt_m"].get<float>();
+        }
+
+        out.roll_deg   = j.value("roll_deg",         0.0f);
+        out.pitch_deg  = j.value("pitch_deg",        0.0f);
+        out.yaw_deg    = j.value("yaw_deg",          0.0f);
+        out.ground_spd = j.value("ground_speed_mps", 0.0f);
+    } catch (...) {
+        out = TelemetrySnapshot{};
     }
-    if (j.contains("abs_alt_m") && !j["abs_alt_m"].is_null()) {
-        out.abs_alt_m = j["abs_alt_m"].get<float>();
-    }
-    if (j.contains("rel_alt_m") && !j["rel_alt_m"].is_null()) {
-        out.rel_alt_m = j["rel_alt_m"].get<float>();
-    }
-
-    out.roll_deg   = j.value("roll_deg",         0.0f);
-    out.pitch_deg  = j.value("pitch_deg",        0.0f);
-    out.yaw_deg    = j.value("yaw_deg",          0.0f);
-    out.ground_spd = j.value("ground_speed_mps", 0.0f);
 }
 
 std::pair<std::string, std::string> parse_orch(const std::string& header) {

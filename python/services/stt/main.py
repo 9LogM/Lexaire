@@ -59,6 +59,9 @@ class SttService:
             rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
         self._zmq = zmq.Context()
         self.push = transport.push(self._zmq, cfg.require("services.orchestrator_command_pull"))
+        # Slow-joiner guard: PUSH/PULL on TCP needs the connect handshake
+        # to settle before send() crosses the wire.
+        time.sleep(self._CONNECT_GRACE_S)
 
     def _get_whisper(self):
         if self._whisper is not None:
@@ -93,13 +96,11 @@ class SttService:
 
     # -- Modes ----------------------------------------------------------------
 
-    # Pre-send sleep is the slow-joiner guard — PUSH/PULL on TCP needs a
-    # moment after connect() before send() actually crosses the wire.
-    # Post-send is handled by the socket's LINGER setting on close().
+    # Slow-joiner grace applied once in __init__; LINGER on close handles
+    # the post-send side.
     _CONNECT_GRACE_S = 0.15
 
     def run_once(self, text: str) -> int:
-        time.sleep(self._CONNECT_GRACE_S)
         self.send(text)
         return 0
 
@@ -113,7 +114,6 @@ class SttService:
             self.log.warning("whisper: no speech detected in %s", path)
             return 0
         self.log.info("whisper: %s", text)
-        time.sleep(self._CONNECT_GRACE_S)
         self.send(text)
         return 0
 

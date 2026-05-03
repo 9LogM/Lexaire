@@ -419,7 +419,9 @@ class Orchestrator:
                     break
                 result = self._dispatch_tool_call(tc)
                 mission.record(tc.name, dict(tc.args or {}), result)
-                if result.error in ("bridge_offline", "timeout"):
+                if (result.error in ("bridge_offline", "timeout")
+                        or (isinstance(result.error, str)
+                            and result.error.startswith("wire_error"))):
                     self._record_skipped(mission, decision.tool_calls[i + 1:],
                                          "skipped:bridge_offline")
                     offline = True
@@ -599,10 +601,12 @@ class Orchestrator:
                 self._bridge_offline_flag = True
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
         except (zmq.ZMQError, ValueError, TypeError) as e:
-            # Wedged REQ / partial recv / malformed JSON / non-dict reply —
-            # surface as an error so the main loop keeps running.
+            # Wedged REQ / partial recv / malformed JSON / non-dict reply.
+            # Flag offline so the next dispatch short-circuits at the gate.
             self.log.warning("tool %s wire error: %r", tc.name, e)
             self._reset_req_socket()
+            with self._bridge_lock:
+                self._bridge_offline_flag = True
             return ToolResult(
                 request_id=tc.request_id, ok=False, error=f"wire_error: {e!r}"
             )
