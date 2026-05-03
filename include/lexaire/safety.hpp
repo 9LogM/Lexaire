@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -67,16 +68,20 @@ inline SafetyDecision check_tool(const std::string& name,
         return {false, "spoken_arm_required"};
     }
 
-    auto as_d = [&](const char* k, double def = 0.0) -> double {
+    // Returns nullopt on wrong-typed args so the safety layer rejects
+    // rather than silently coerces to the default.
+    auto as_d = [&](const char* k, double def = 0.0)
+            -> std::optional<double> {
         if (!args.contains(k)) return def;
         const auto& v = args[k];
         if (v.is_number()) return v.get<double>();
-        return def;
+        return std::nullopt;
     };
 
     if (name == "takeoff") {
-        double alt = as_d("altitude_m", 0.0);
-        if (alt > env.max_altitude_m)
+        auto alt = as_d("altitude_m", 0.0);
+        if (!alt) return {false, "wrong_type:altitude_m"};
+        if (*alt > env.max_altitude_m)
             return {false, "altitude_exceeds_max"};
     }
 
@@ -85,19 +90,26 @@ inline SafetyDecision check_tool(const std::string& name,
         // location). If a future tool ever introduces "delta from current"
         // semantics, the geofence math here silently becomes wrong.
         if (args.contains("d")) {
-            double rel_alt = -as_d("d");
+            auto d = as_d("d");
+            if (!d) return {false, "wrong_type:d"};
+            double rel_alt = -*d;
             if (rel_alt > env.max_altitude_m)
                 return {false, "altitude_exceeds_max"};
         }
-        double n = as_d("n"), e = as_d("e");
-        double r = std::sqrt(n * n + e * e);
+        auto n = as_d("n"), e = as_d("e");
+        if (!n) return {false, "wrong_type:n"};
+        if (!e) return {false, "wrong_type:e"};
+        double r = std::sqrt(*n * *n + *e * *e);
         if (r > env.geofence_radius_m)
             return {false, "geofence_breach"};
     }
 
     if (name == "set_velocity_ned") {
-        double vx = as_d("vx"), vy = as_d("vy"), vz = as_d("vz");
-        double s = std::sqrt(vx * vx + vy * vy + vz * vz);
+        auto vx = as_d("vx"), vy = as_d("vy"), vz = as_d("vz");
+        if (!vx) return {false, "wrong_type:vx"};
+        if (!vy) return {false, "wrong_type:vy"};
+        if (!vz) return {false, "wrong_type:vz"};
+        double s = std::sqrt(*vx * *vx + *vy * *vy + *vz * *vz);
         if (s > env.max_velocity_mps)
             return {false, "velocity_exceeds_max"};
     }

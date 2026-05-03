@@ -564,8 +564,8 @@ class Orchestrator:
         if tc.name == "arm":
             args["voice_confirmed"] = self._current_arm_authorized
 
-        req = self._ensure_req_socket()
         try:
+            req = self._ensure_req_socket()
             req.send(json.dumps({
                 "request_id": tc.request_id,
                 "name": tc.name,
@@ -599,6 +599,8 @@ class Orchestrator:
             self._reset_req_socket()
             with self._bridge_lock:
                 self._bridge_offline_flag = True
+            self._publish_status("bridge_offline",
+                                  f"{tc.name} timed out — bridge unreachable")
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
         except (zmq.ZMQError, ValueError, TypeError) as e:
             # Wedged REQ / partial recv / malformed JSON / non-dict reply.
@@ -607,6 +609,8 @@ class Orchestrator:
             self._reset_req_socket()
             with self._bridge_lock:
                 self._bridge_offline_flag = True
+            self._publish_status("bridge_offline",
+                                  f"{tc.name} wire error: {e!r}")
             return ToolResult(
                 request_id=tc.request_id, ok=False, error=f"wire_error: {e!r}"
             )
