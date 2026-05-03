@@ -96,7 +96,10 @@ class GeminiVLM(VLM):
                         thought_parts.append(str(text))
         except Exception as e:
             log.exception("Gemini call failed: %s", e)
-            return VlmDecision(thought=f"vlm_error: {e}", tool_calls=[])
+            # str(e) on google-genai errors can include the request URL
+            # with the API-key tail; this string flows over the status
+            # PUB to the TUI. Publish only the class name.
+            return VlmDecision(thought=f"vlm_error: {type(e).__name__}", tool_calls=[])
 
         thought = " ".join(thought_parts).strip() or "(no text)"
         return VlmDecision(thought=thought, tool_calls=calls)

@@ -61,10 +61,14 @@ def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
 
     fx = float(intrinsics.get("fx", 0.0))
     fy = float(intrinsics.get("fy", 0.0))
-    ppx = float(intrinsics.get("ppx", 0.0))
-    ppy = float(intrinsics.get("ppy", 0.0))
-    if fx <= 0 or fy <= 0:
+    ppx_raw = intrinsics.get("ppx")
+    ppy_raw = intrinsics.get("ppy")
+    # ppx/ppy at 0 would put the principal point in the corner and shift
+    # back-projected XYZ by ~half-frame; fail closed on missing.
+    if fx <= 0 or fy <= 0 or ppx_raw is None or ppy_raw is None:
         return z_m, None
+    ppx = float(ppx_raw)
+    ppy = float(ppy_raw)
 
     X = (cx - ppx) * z_m / fx
     Y = (cy - ppy) * z_m / fy
