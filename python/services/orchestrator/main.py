@@ -58,10 +58,13 @@ class OrchestratorMission:
     """Active multi-step mission state. Surfaced to the VLM via VlmContext."""
     goal_text: str
     started_ts_ns: int
+    # Tools that actually dispatched. step_history holds executed +
+    # skipped entries; current_step counts only executed.
     current_step: int = 0
     step_history: list[dict] = dataclasses.field(default_factory=list)
 
-    def record(self, tool_name: str, args: dict, result: ToolResult) -> None:
+    def record(self, tool_name: str, args: dict, result: ToolResult,
+                *, executed: bool = True) -> None:
         self.step_history.append({
             "tool": tool_name,
             "args": args,
@@ -69,7 +72,8 @@ class OrchestratorMission:
             "error": result.error,
             "ts_ns": now_ns(),
         })
-        self.current_step += 1
+        if executed:
+            self.current_step += 1
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -117,7 +121,12 @@ class Orchestrator:
             depth_endpoint=cfg.require("sensor.channels.depth"),
         )
         self.latest_fs = None
+        self.latest_fs_ts: float = 0.0  # monotonic at write
         self.latest_fs_lock = threading.Lock()
+        # If the publisher dies, the VLM would otherwise reason over a
+        # frozen scene and emit geometry tool calls against a moved world.
+        self._frame_max_age_s = float(
+            cfg.get("orchestrator.frame_max_age_s", 2.0))
 
         self.command_pull = transport.pull(self._zmq, cfg.require("services.orchestrator_command_pull"))
         self.status_pub = transport.pub(self._zmq, cfg.require("services.orchestrator_status_pub"))
@@ -292,8 +301,10 @@ class Orchestrator:
             fs = self.sub.get(timeout=0.25)
             if fs is None:
                 continue
+            now = time.monotonic()
             with self.latest_fs_lock:
                 self.latest_fs = fs
+                self.latest_fs_ts = now
 
     # -- Decision loop --------------------------------------------------------
 
@@ -491,13 +502,15 @@ class Orchestrator:
                          remaining: list, reason: str) -> None:
         """Drop k+1..N from a partially-executed batch into step_history
         as failures so the audit trail and the VLM's `mission` view
-        reflect what actually didn't run, instead of vanishing them."""
+        reflect what actually didn't run, instead of vanishing them.
+        executed=False so current_step stays accurate."""
         for skipped in remaining:
             mission.record(
                 skipped.name,
                 dict(skipped.args or {}),
                 ToolResult(request_id=skipped.request_id,
                             ok=False, error=reason),
+                executed=False,
             )
 
     def _build_context(
@@ -511,13 +524,16 @@ class Orchestrator:
             telem = dict(self.latest_telem)
             telem_hist = [hdr for (_t, hdr) in self._telem_history]
         with self.latest_fs_lock:
-            rgb = self.latest_fs.rgb.copy() if self.latest_fs is not None else None
+            age = time.monotonic() - self.latest_fs_ts if self.latest_fs is not None else None
+            rgb = (self.latest_fs.rgb.copy()
+                   if self.latest_fs is not None and age is not None
+                       and age <= self._frame_max_age_s
+                   else None)
         return VlmContext(
             user_command=cmd.text,
             telemetry=telem,
             scene=scene,
             rgb=rgb,
-            history=list(self.history),
             safety=dict(self.safety_snapshot),
             telemetry_history=telem_hist,
             mission=mission.to_dict() if mission is not None else None,

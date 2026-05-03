@@ -795,8 +795,7 @@ int main() {
     ctx.publisher_repo = publisher_repo;
 
     ctx.signals.async_wait([&ctx](const boost::system::error_code&, int) {
-        endwin();
-        ctx.io.stop();
+        ctx.io.stop();  // EndwinGuard at scope exit restores the terminal.
     });
 
     ctx.services_watcher = std::make_unique<ServicesWatcher>(

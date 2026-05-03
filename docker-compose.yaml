@@ -17,6 +17,11 @@ services:
     env_file:
       - path: .env
         required: false
+    # TUI shells out to ssh orbis@drone.local. Use :- (not :?) so it
+    # still boots without .env — pre-flight surfaces the missing config
+    # rather than compose failing at parse time.
+    extra_hosts:
+      - "drone.local:${DRONE_PI_IP:-0.0.0.0}"
     volumes:
       - ./common:/workspace/common:ro
       - ~/.ssh:/mnt/ssh:ro

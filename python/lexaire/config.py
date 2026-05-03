@@ -43,14 +43,16 @@ class _AttrDict(dict):
         self[name] = value
 
     def get(self, path: str, default: Any = None) -> Any:
-        """Dotted-path lookup with default."""
+        """Dotted-path lookup with default. YAML-null is treated as missing
+        so commenting out a value line falls back to the default rather
+        than crashing downstream casts (float(None) etc.)."""
         cur: Any = self
         for part in path.split("."):
             if isinstance(cur, dict) and part in cur:
                 cur = cur[part]
             else:
                 return default
-        return cur
+        return cur if cur is not None else default
 
     def require(self, path: str) -> Any:
         """Dotted-path lookup that raises if the key is missing or null."""
@@ -106,7 +108,11 @@ def _load_dotenv(start: Path) -> None:
                     continue
                 k, v = line.split("=", 1)
                 k = k.strip()
-                v = v.strip().strip('"').strip("'")
+                v = v.strip()
+                # Only strip quotes when both ends match — bare `.strip('"')`
+                # would corrupt API keys like `foo'bar` or `"fooo`.
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':
+                    v = v[1:-1]
                 if k and k not in os.environ:
                     os.environ[k] = v
             return

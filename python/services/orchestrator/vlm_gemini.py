@@ -77,7 +77,9 @@ class GeminiVLM(VLM):
                 contents=parts,
                 config=self._config,
             )
-            for candidate in getattr(resp, "candidates", []) or []:
+            # Cap at the first candidate — if candidate_count >1, alternates'
+            # tool_calls would concatenate and dispatch together.
+            for candidate in (getattr(resp, "candidates", []) or [])[:1]:
                 content = getattr(candidate, "content", None)
                 if content is None:
                     continue

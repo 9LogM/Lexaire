@@ -20,7 +20,6 @@ class VlmContext:
     telemetry: dict                 # decoded TelemetryHeader (latest sample)
     scene: dict                     # decoded SceneHeader (latest)
     rgb: Optional[np.ndarray] = None  # (H, W, 3) BGR, current frame — may be None
-    history: list[str] = field(default_factory=list)
     safety: dict = field(default_factory=dict)
     # Recent telemetry samples (oldest -> newest) so the VLM can reason about
     # trends — battery dropping, approaching geofence, altitude unstable.

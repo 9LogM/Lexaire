@@ -153,10 +153,16 @@ static int run() {
     const std::string tele_bind = lexaire::bind_endpoint(telemetry_ep);
     if (zmq_bind(rep, rep_bind.c_str()) != 0) {
         std::fprintf(stderr, "[flight-bridge] zmq_bind REP %s failed: %s\n", rep_bind.c_str(), zmq_strerror(zmq_errno()));
+        zmq_close(rep);
+        zmq_close(pub);
+        zmq_ctx_destroy(zctx);
         return 3;
     }
     if (zmq_bind(pub, tele_bind.c_str()) != 0) {
         std::fprintf(stderr, "[flight-bridge] zmq_bind PUB %s failed: %s\n", tele_bind.c_str(), zmq_strerror(zmq_errno()));
+        zmq_close(rep);
+        zmq_close(pub);
+        zmq_ctx_destroy(zctx);
         return 3;
     }
 
@@ -296,7 +302,15 @@ static int run() {
         } catch (const std::exception& e) {
             result = lexaire::ToolResult{"", false, std::string("bad_request: ") + e.what(), json::object()};
         }
-        std::string reply = result.to_json().dump();
+        // A serialize throw outside this catch would leave REP wedged
+        // in must-send. Fall back to a minimal reply.
+        std::string reply;
+        try {
+            reply = result.to_json().dump();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[flight-bridge] reply serialize failed: %s\n", e.what());
+            reply = R"({"ok":false,"error":"internal_serialize_failed","data":null})";
+        }
         // A failed send wedges the REP socket in "must-send" state — every
         // subsequent recv returns EFSM. Rebuild to recover.
         if (zmq_send(rep, reply.data(), reply.size(), 0) < 0) {

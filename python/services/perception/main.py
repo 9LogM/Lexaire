@@ -67,9 +67,12 @@ def cli() -> int:
 
     try:
         while not stop:
+            # Drain to newest — one-per-tick against a faster publisher
+            # saturates the matcher's queue and lags YOLO behind real-time.
             fs = sub.get_nowait()
-            if fs is not None:
+            while fs is not None:
                 latest_fs = fs
+                fs = sub.get_nowait()
 
             now = time.monotonic()
             if once_deadline is not None and latest_fs is None and now >= once_deadline:
