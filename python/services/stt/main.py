@@ -17,7 +17,7 @@ Modes:
 
 The abort keyword from `stt.abort_keyword` (default `"abort"`) flips
 `is_abort=True` on the outgoing command so the orchestrator can short-circuit
-straight to the abort tool without waiting on the VLM.
+straight to the abort tool without waiting on the VLA.
 """
 
 from __future__ import annotations

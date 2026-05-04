@@ -1,7 +1,7 @@
 #pragma once
 
 // Safety envelope enforced by the flight bridge below the tool-call layer.
-// Regardless of what the VLM decides, a tool call that violates the envelope
+// Regardless of what the VLA decides, a tool call that violates the envelope
 // is rejected.
 
 #include <atomic>

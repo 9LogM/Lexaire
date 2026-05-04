@@ -1,26 +1,26 @@
 """
-Orchestrator service.
+Orchestrator service (VLA mode).
 
-Ties voice commands, perception, and telemetry together. On every new user
-command, it asks the VLM to decide what to do given the current state, then
-dispatches the resulting ToolCalls to the flight bridge via REQ/REP.
+Runs a continuous control loop at `orchestrator.control_hz`. On every
+tick the VLA backend gets the latest RGB frame, the operator's current
+spoken instruction (held in context across ticks until the operator
+updates it), and telemetry, and emits at most one tool call.
 
 Threads:
     * command_thread   — PULLs voice commands from the STT service queue.
-    * scene_thread     — SUBs the perception scene channel.
     * telemetry_thread — SUBs the flight bridge telemetry.
-    * frame_thread     — pulls RGB frames from the sensor subscriber so the VLM
-                          has pixel context on every decision.
-    * main thread      — decision loop: wake on a new command, call VLM,
-                          dispatch tool calls, publish status.
+    * frame_thread     — pulls RGB frames from the sensor subscriber.
+    * main thread      — control loop: tick at control_hz, call VLA,
+                          dispatch one tool, publish status.
+
+Voice commands are held as the current `instruction` in the context.
+A new voice command replaces the previous instruction; an abort or
+the abort-keyword short-circuits straight to the abort tool.
 """
 
 from __future__ import annotations
 
 import argparse
-import collections
-import concurrent.futures
-import dataclasses
 import json
 import queue
 import re
@@ -40,98 +40,56 @@ from lexaire.messages import (
 )
 from lexaire.subscriber import SensorSubscriber
 
-from .vlm_base import VLM, VlmContext
+from .vla_base import VLA, VlaContext
 
 
-# Tool calls that end a mission cleanly. After any of these the orchestrator
-# stops re-prompting the VLM and returns to idle.
-_TERMINAL_TOOLS = frozenset({"hold", "land", "abort", "return_to_launch", "kill", "disarm"})
-
-# Mission re-prompt loop bails when the same (tool, error) appears at least
-# _STUCK_FAILURE_THRESHOLD times in the trailing _STUCK_FAILURE_WINDOW steps.
-_STUCK_FAILURE_WINDOW = 4
-_STUCK_FAILURE_THRESHOLD = 2
-
-
-@dataclasses.dataclass
-class OrchestratorMission:
-    """Active multi-step mission state. Surfaced to the VLM via VlmContext."""
-    goal_text: str
-    started_ts_ns: int
-    # Tools that actually dispatched. step_history holds executed +
-    # skipped entries; current_step counts only executed.
-    current_step: int = 0
-    step_history: list[dict] = dataclasses.field(default_factory=list)
-
-    def record(self, tool_name: str, args: dict, result: ToolResult,
-                *, executed: bool = True) -> None:
-        self.step_history.append({
-            "tool": tool_name,
-            "args": args,
-            "ok": result.ok,
-            "error": result.error,
-            "ts_ns": now_ns(),
-        })
-        if executed:
-            self.current_step += 1
-
-    def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
-
-
-def _build_vlm(cfg) -> VLM:
-    provider = cfg.get("perception.vlm.provider", "gemini")
-    if provider == "gemini":
-        from .vlm_gemini import build_gemini
-        return build_gemini(cfg)
-    raise ValueError(f"unknown vlm provider: {provider}")
+def _build_vla(cfg) -> VLA:
+    from .vla import build_vla
+    return build_vla(cfg)
 
 
 class Orchestrator:
     def __init__(self, cfg):
         self.cfg = cfg
         self.log = logs.configure("orchestrator", cfg.get("logging.level", "INFO"))
-        self.vlm = _build_vlm(cfg)
+        self.vla = _build_vla(cfg)
 
         self.stop_event = threading.Event()
-        self.command_q: queue.Queue[VoiceCommand] = queue.Queue(maxsize=16)
-        self.history: list[str] = []
         self._threads: list[threading.Thread] = []
 
-        self.latest_scene: dict = {}
-        self.latest_scene_lock = threading.Lock()
+        # Continuous control: tick rate the main loop drives the VLA at.
+        self._control_hz = float(cfg.get("orchestrator.control_hz", 10.0))
+        if self._control_hz <= 0:
+            raise ValueError("orchestrator.control_hz must be > 0")
+        self._control_period_s = 1.0 / self._control_hz
+
+        # Operator's current instruction. Updated by the command thread,
+        # read by the main loop. None means "no instruction yet — idle."
+        self._instruction: Optional[str] = None
+        self._instruction_lock = threading.Lock()
 
         self.latest_telem: dict = {}
         self.latest_telem_lock = threading.Lock()
-        # Telemetry ring buffer (oldest -> newest), pruned by wallclock age in
-        # _run_telemetry_thread. Configured depth in seconds; the buffer
-        # holds however many samples the bridge published in that window.
-        self._telem_history_s = float(cfg.get("orchestrator.telemetry_history_seconds", 5.0))
-        self._telem_history: collections.deque = collections.deque()
 
-        # One private zmq.Context for every socket this orchestrator owns —
-        # PUB, SUB, PULL, REQ, plus the SensorSubscriber's. Avoids the
-        # process-wide singleton and gives stop() a clean term().
         self._zmq = zmq.Context()
 
-        # Hold onto the latest frame so the VLM sees current pixels.
         self.sub = SensorSubscriber(
             self._zmq,
             rgb_endpoint=cfg.require("sensor.channels.rgb"),
             depth_endpoint=cfg.require("sensor.channels.depth"),
         )
         self.latest_fs = None
-        self.latest_fs_ts: float = 0.0  # monotonic at write
+        self.latest_fs_ts: float = 0.0
         self.latest_fs_lock = threading.Lock()
-        # If the publisher dies, the VLM would otherwise reason over a
-        # frozen scene and emit geometry tool calls against a moved world.
+        # Tight default for VLA closed-loop control — a 2 s gate would
+        # let the model command setpoints against pixels that are 60
+        # ticks old at 30 Hz.
         self._frame_max_age_s = float(
-            cfg.get("orchestrator.frame_max_age_s", 2.0))
+            cfg.get("orchestrator.frame_max_age_s", 0.2))
 
         self.command_pull = transport.pull(self._zmq, cfg.require("services.orchestrator_command_pull"))
-        self.status_pub = transport.pub(self._zmq, cfg.require("services.orchestrator_status_pub"))
-        self.scene_sub  = transport.sub(self._zmq, cfg.require("services.perception_scene_pub"))
-        self.telem_sub  = transport.sub(self._zmq, cfg.require("services.telemetry_pub"))
+        self.status_pub   = transport.pub(self._zmq, cfg.require("services.orchestrator_status_pub"))
+        self.telem_sub    = transport.sub(self._zmq, cfg.require("services.telemetry_pub"))
         self.flight_req_endpoint = cfg.require("services.flight_bridge_rep")
 
         self.safety_snapshot = {
@@ -140,59 +98,40 @@ class Orchestrator:
             "max_velocity_mps":  float(cfg.get("safety.max_velocity_mps", 1.5)),
         }
 
-        # Set only on REQ timeout, cleared on any reply.
         self._bridge_offline_flag = False
         self._bridge_lock = threading.Lock()
 
-        # Lazy REQ socket; recycled on timeout because REQ doesn't tolerate
-        # a missed recv (strict send/recv state machine).
         self._req_socket: Optional[zmq.Socket] = None
 
-        # Word-boundary match so "laboratory" / "abortive" don't trip the
-        # abort path. STT also flags is_abort up front; this is the
-        # belt-and-suspenders check on text we receive directly.
-        # Guard against empty/whitespace abort_keyword: an empty string
-        # would compile to `\b\b`, which matches every word boundary,
-        # turning every voice command into is_abort=True.
+        # Word-boundary so "laboratory"/"abortive" don't trip. Empty/
+        # whitespace keyword would compile to `\b\b` and match every
+        # word boundary.
         abort_kw = cfg.get("stt.abort_keyword", "abort").strip()
         if not abort_kw:
             raise ValueError(
-                "stt.abort_keyword is empty/whitespace — would treat every "
+                "stt.abort_keyword is empty/whitespace — would flag every "
                 "command as abort. Set a non-empty keyword in config.yaml."
             )
         self._abort_pattern = re.compile(
             rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
 
-        # Voice-arm authorization. The bridge's safety gate (safety.hpp)
-        # only allows arm when args.voice_confirmed is true; this regex
-        # decides whether the orchestrator is allowed to set that flag.
-        # Set per command in _on_command, consulted in _dispatch_tool_call.
-        # Without this, a VLM-emitted arm during an unrelated mission
-        # ("take a picture") would still pass the gate.
+        # Voice-arm gate. Held until disarm/abort, not per command. If
+        # the operator says "arm" once, subsequent commands inherit the
+        # authorization until an explicit disarm or an abort fires.
         self._arm_pattern = re.compile(r"\barm\b", re.IGNORECASE)
-        self._current_arm_authorized = False
-
-        # Set by the command thread when an abort arrives so the main
-        # thread can abandon any in-flight VLM call instead of waiting
-        # out the full RTT (Gemini calls have no built-in timeout).
-        self._preempt_event = threading.Event()
-
-        # Two workers so a stale post-preempt VLM call doesn't block the
-        # next normal command's submit. Stale futures keep running to
-        # completion in the background; we just never read their result.
-        self._vlm_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="orch-vlm")
+        self._arm_authorized = False
+        self._arm_authorized_lock = threading.Lock()
 
     # -- Lifecycle ------------------------------------------------------------
 
     def start(self):
         self.sub.start()
         self._spawn(self._run_command_thread,   "orch-command")
-        self._spawn(self._run_scene_thread,     "orch-scene")
         self._spawn(self._run_telemetry_thread, "orch-telem")
         self._spawn(self._run_frame_thread,     "orch-frame")
         self._publish_status("idle", "startup")
-        self.log.info("orchestrator up  vlm=%s", type(self.vlm).__name__)
+        self.log.info("orchestrator up  vla=%s  control_hz=%.1f",
+                      type(self.vla).__name__, self._control_hz)
 
     def _spawn(self, target, name):
         t = threading.Thread(target=target, name=name, daemon=True)
@@ -201,13 +140,10 @@ class Orchestrator:
 
     def stop(self):
         self.stop_event.set()
-        self._preempt_event.set()
-        # Don't wait for in-flight VLM calls — they own external HTTP RTT.
-        self._vlm_executor.shutdown(wait=False, cancel_futures=True)
         self.sub.stop()
         for t in self._threads:
             t.join(timeout=1.5)
-        for s in (self.command_pull, self.status_pub, self.scene_sub, self.telem_sub):
+        for s in (self.command_pull, self.status_pub, self.telem_sub):
             if s is not None:
                 s.close()
         self._reset_req_socket()
@@ -231,47 +167,46 @@ class Orchestrator:
                     is_abort=bool(hdr.get("is_abort", False)),
                 )
                 self.log.info("command: %r (abort=%s)", cmd.text, cmd.is_abort)
-                if cmd.is_abort:
-                    # Abort jumps the queue: drain pending commands so the
-                    # next get() returns abort, not the head of the FIFO.
-                    drained = 0
-                    try:
-                        while True:
-                            self.command_q.get_nowait()
-                            drained += 1
-                    except queue.Empty:
-                        pass
-                    if drained:
-                        self.log.warning("abort drained %d pending commands", drained)
-                    self.command_q.put_nowait(cmd)
-                    # Wake the main thread out of any in-flight VLM call so
-                    # the abort doesn't wait for Gemini's RTT (or forever
-                    # if the call hangs).
-                    self._preempt_event.set()
-                else:
-                    try:
-                        self.command_q.put_nowait(cmd)
-                    except queue.Full:
-                        self.log.warning("command queue full — dropping")
+                # Short-circuit aborts: dispatch directly, clear the
+                # arm-authorization, drop instruction.
+                if cmd.is_abort or self._abort_pattern.search(cmd.text):
+                    self._on_abort(cmd)
+                    continue
+                # Latch arm authorization on first "arm" until disarm/abort.
+                if self._arm_pattern.search(cmd.text):
+                    with self._arm_authorized_lock:
+                        self._arm_authorized = True
+                # Replace the current instruction. Continuous: VLA picks
+                # this up on its next tick; no per-command mission.
+                with self._instruction_lock:
+                    self._instruction = cmd.text
             except Exception:
-                # log.exception preserves traceback so a malformed payload
-                # is debuggable; .warning('%s', e) loses the stack.
                 self.log.exception("command decode error")
 
-    def _run_scene_thread(self):
-        poller = zmq.Poller()
-        poller.register(self.scene_sub, zmq.POLLIN)
-        while not self.stop_event.is_set():
-            events = dict(poller.poll(250))
-            if self.scene_sub not in events:
-                continue
-            try:
-                frame = self.scene_sub.recv()
-                hdr = decode_header(frame)
-                with self.latest_scene_lock:
-                    self.latest_scene = hdr
-            except Exception:
-                self.log.exception("scene decode error")
+    def _on_abort(self, cmd: VoiceCommand):
+        """Abort fast-path. Bypasses the VLA, dispatches abort directly,
+        clears in-flight instruction and arm authorization."""
+        self._publish_status("aborted", f"abort keyword: {cmd.text!r}")
+        with self._instruction_lock:
+            self._instruction = None
+        with self._arm_authorized_lock:
+            self._arm_authorized = False
+        result = self._dispatch_tool_call(ToolCall(
+            request_id=VLA.new_request_id(),
+            name="abort",
+            args={},
+        ))
+        if not result.ok:
+            if self._bridge_offline():
+                self._publish_status(
+                    "bridge_offline",
+                    f"abort {cmd.text!r} did not reach the flight bridge",
+                )
+            else:
+                self._publish_status(
+                    "abort_failed",
+                    f"abort rejected by bridge: {result.error}",
+                )
 
     def _run_telemetry_thread(self):
         poller = zmq.Poller()
@@ -283,16 +218,8 @@ class Orchestrator:
             try:
                 frame = self.telem_sub.recv()
                 hdr = decode_header(frame)
-                now = time.monotonic()
                 with self.latest_telem_lock:
                     self.latest_telem = hdr
-                    self._telem_history.append((now, hdr))
-                    # Prune samples older than the configured window. The
-                    # bridge publishes at ~10 Hz so the buffer naturally
-                    # grows to ~10*window-seconds entries.
-                    cutoff = now - self._telem_history_s
-                    while self._telem_history and self._telem_history[0][0] < cutoff:
-                        self._telem_history.popleft()
             except Exception:
                 self.log.exception("telem decode error")
 
@@ -306,242 +233,70 @@ class Orchestrator:
                 self.latest_fs = fs
                 self.latest_fs_ts = now
 
-    # -- Decision loop --------------------------------------------------------
+    # -- Control loop ---------------------------------------------------------
 
     def run(self):
+        """Continuous control loop at control_hz. On each tick:
+        1. Build context from latest frame / telemetry / instruction.
+        2. Call VLA.decide().
+        3. Dispatch the resulting tool call (if any).
+        4. Sleep to the next tick.
+        """
+        next_tick = time.monotonic()
         while not self.stop_event.is_set():
+            ctx = self._build_context()
             try:
-                cmd = self.command_q.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            self._on_command(cmd)
-
-    def _on_command(self, cmd: VoiceCommand):
-        # Each new voice command gets a fresh attempt — without this, a
-        # single REQ timeout would lock out the orchestrator forever
-        # (the on-success clear in _dispatch_tool_call is unreachable
-        # while the bridge_offline short-circuit at the top of that
-        # function returns early).
-        with self._bridge_lock:
-            self._bridge_offline_flag = False
-
-        # Clear any preempt signal from the previous command — we're
-        # about to start consuming from the command queue and the
-        # main-loop poll below should only react to NEW signals.
-        self._preempt_event.clear()
-
-        # Decide arm authorization once per user command. This flips
-        # voice_confirmed in _dispatch_tool_call only when the operator
-        # actually said "arm" — without this, a VLM-emitted arm during
-        # any other utterance ("take a picture") would defeat the gate.
-        self._current_arm_authorized = bool(self._arm_pattern.search(cmd.text))
-
-        if cmd.is_abort or self._abort_pattern.search(cmd.text):
-            self._publish_status("aborted", f"abort keyword: {cmd.text!r}")
-            result = self._dispatch_tool_call(ToolCall(
-                request_id=VLM.new_request_id(),
-                name="abort",
-                args={},
-            ))
-            if not result.ok:
-                if self._bridge_offline():
-                    self._publish_status(
-                        "bridge_offline",
-                        f"abort {cmd.text!r} did not reach the flight bridge",
-                    )
-                else:
-                    self._publish_status(
-                        "abort_failed",
-                        f"abort rejected by bridge: {result.error}",
-                    )
-            # Aborts are the most safety-critical events; they MUST land
-            # in the audit trail even though the rest of the mission state
-            # machine is short-circuited above.
-            suffix = "" if result.ok else f" ({result.error})"
-            self.history.append(f"user: {cmd.text} | end: aborted{suffix}")
-            self.history[:] = self.history[-20:]
-            return
-
-        max_steps = int(self.cfg.get("orchestrator.mission_max_steps", 10))
-        mission = OrchestratorMission(goal_text=cmd.text, started_ts_ns=now_ns())
-        # decision_count bounds VLM calls; mission.current_step counts
-        # individual tool calls in a batch.
-        decision_count = 0
-        terminal_call: Optional[str] = None
-        stuck = False
-        vlm_error: Optional[str] = None
-        preempted = False
-
-        # Re-prompt the VLM with each tool result; bounded by max_steps
-        # decisions and preempted by a fresh voice command (next run()
-        # iteration picks it up).
-        while decision_count < max_steps and not self.stop_event.is_set():
-            if self._preempt_event.is_set() or not self.command_q.empty():
-                self.log.info("mission preempted by new voice command")
-                preempted = True
-                break
-
-            ctx = self._build_context(cmd, mission=mission)
-            step_label = f"decision {decision_count + 1}/{max_steps}"
-            self._publish_status("thinking", f"{step_label}: {cmd.text!r}")
-
-            # Run the VLM call on a worker so we can poll _preempt_event
-            # and bail when the operator says "abort" mid-call. The stale
-            # future keeps running to completion; we just discard it.
-            fut = self._vlm_executor.submit(self.vlm.decide, ctx)
-            while not fut.done():
-                if self.stop_event.is_set() or self._preempt_event.is_set():
-                    break
-                time.sleep(0.05)
-            if self._preempt_event.is_set() or self.stop_event.is_set():
-                self.log.info("VLM call abandoned (preempt or shutdown)")
-                preempted = True
-                break
-            # fut.result() re-raises any exception thrown inside vlm.decide.
-            # Backends should self-handle quota / network / parse errors and
-            # return a vlm_error: VlmDecision; an unexpected raise here
-            # would otherwise propagate to run() and kill the orchestrator
-            # main thread, with worker threads still alive queueing commands
-            # nobody dispatches.
-            try:
-                decision = fut.result()
+                decision = self.vla.decide(ctx)
             except Exception as e:
-                self.log.exception("VLM decide() raised unhandled: %s", e)
-                vlm_error = f"vlm_error: {e!r}"
-                break
-            decision_count += 1
-            self.log.info("%s decision: %s -> %d tool_calls",
-                          step_label, decision.thought, len(decision.tool_calls))
+                self.log.exception("VLA decide() raised unhandled: %s", e)
+                self._publish_status("vla_error", f"vla_error: {type(e).__name__}")
+                # Don't kill the loop on a single bad inference; the
+                # next tick may recover. Skip this tick's dispatch.
+                next_tick += self._control_period_s
+                self._sleep_to_next_tick(next_tick)
+                continue
 
-            if not decision.tool_calls:
-                if decision.thought.startswith("vlm_error:"):
-                    # Quota / network / key error from the VLM backend.
-                    # Surface as its own status so the TUI shows red, not
-                    # "idle" with a stale thought string.
-                    vlm_error = decision.thought
-                    self.log.error("VLM call failed: %s", decision.thought)
-                break
+            if decision.tool_call is not None:
+                self._publish_status("executing",
+                                      decision.thought or decision.tool_call.name)
+                self._dispatch_tool_call(decision.tool_call)
+            else:
+                self._publish_status("idle", decision.thought or "idle")
 
-            self._publish_status("executing", decision.thought)
-            offline = False
-            stuck = False
-            for i, tc in enumerate(decision.tool_calls):
-                if self.stop_event.is_set() or self._preempt_event.is_set():
-                    self._record_skipped(mission, decision.tool_calls[i:],
-                                         "skipped:preempted")
-                    preempted = True
-                    break
-                result = self._dispatch_tool_call(tc)
-                mission.record(tc.name, dict(tc.args or {}), result)
-                if (result.error in ("bridge_offline", "timeout")
-                        or (isinstance(result.error, str)
-                            and result.error.startswith("wire_error"))):
-                    self._record_skipped(mission, decision.tool_calls[i + 1:],
-                                         "skipped:bridge_offline")
-                    offline = True
-                    break
-                if not result.ok and result.error is not None:
-                    matches = sum(
-                        1 for step in mission.step_history[-_STUCK_FAILURE_WINDOW:]
-                        if step["tool"] == tc.name and step["error"] == result.error
-                    )
-                    # End the mission once the VLM is stuck on a loop it can't
-                    # escape on its own (canonical case: PX4 'Arming denied').
-                    self._record_skipped(mission, decision.tool_calls[i + 1:],
-                                         "skipped:prior_failure")
-                    if matches >= _STUCK_FAILURE_THRESHOLD:
-                        self.log.warning(
-                            "mission stuck: %s failed %d times with %r; bailing",
-                            tc.name, matches, result.error)
-                        stuck = True
-                        break
-                    break
-                if tc.name in _TERMINAL_TOOLS:
-                    self._record_skipped(mission, decision.tool_calls[i + 1:],
-                                         "skipped:after_terminal")
-                    terminal_call = tc.name
-                    break
+            next_tick += self._control_period_s
+            self._sleep_to_next_tick(next_tick)
 
-            if terminal_call is not None or offline or stuck or preempted:
-                break
+    def _sleep_to_next_tick(self, next_tick: float):
+        """Sleep until next_tick (monotonic), responsive to stop_event."""
+        while not self.stop_event.is_set():
+            now = time.monotonic()
+            remaining = next_tick - now
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.05))
 
-        # Order matters: stop_event takes precedence over the no-flags
-        # fallthroughs below, otherwise a SIGTERM mid-batch reports
-        # "no_tool_calls" or "max_decisions=N" depending on where the
-        # outer-loop budget was at, which is misleading.
-        if self.stop_event.is_set():
-            end_reason = "stopped"
-        elif preempted:
-            end_reason = "preempted"
-        elif terminal_call:
-            end_reason = f"terminal:{terminal_call}"
-        elif self._bridge_offline():
-            end_reason = "bridge_offline"
-        elif vlm_error is not None:
-            end_reason = "vlm_error"
-        elif decision_count >= max_steps:
-            end_reason = f"max_decisions={max_steps}"
-        elif stuck:
-            end_reason = "stuck_on_repeated_failure"
-        else:
-            end_reason = "no_tool_calls"
-        self.history.append(
-            f"user: {cmd.text} | decisions: {decision_count} "
-            f"| tools: {mission.current_step} | end: {end_reason}"
-        )
-        self.history[:] = self.history[-20:]
-        # Bridge-offline and vlm_error already / want to surface their own
-        # state — don't overwrite with "idle" at end of mission.
-        if end_reason == "vlm_error":
-            self._publish_status("vlm_error", vlm_error or "vlm_error")
-        elif end_reason != "bridge_offline":
-            self._publish_status("idle", f"mission done ({end_reason})")
-
-    @staticmethod
-    def _record_skipped(mission: OrchestratorMission,
-                         remaining: list, reason: str) -> None:
-        """Drop k+1..N from a partially-executed batch into step_history
-        as failures so the audit trail and the VLM's `mission` view
-        reflect what actually didn't run, instead of vanishing them.
-        executed=False so current_step stays accurate."""
-        for skipped in remaining:
-            mission.record(
-                skipped.name,
-                dict(skipped.args or {}),
-                ToolResult(request_id=skipped.request_id,
-                            ok=False, error=reason),
-                executed=False,
-            )
-
-    def _build_context(
-        self,
-        cmd: VoiceCommand,
-        mission: Optional[OrchestratorMission] = None,
-    ) -> VlmContext:
-        with self.latest_scene_lock:
-            scene = dict(self.latest_scene)
+    def _build_context(self) -> VlaContext:
         with self.latest_telem_lock:
             telem = dict(self.latest_telem)
-            telem_hist = [hdr for (_t, hdr) in self._telem_history]
         with self.latest_fs_lock:
-            age = time.monotonic() - self.latest_fs_ts if self.latest_fs is not None else None
+            age = (time.monotonic() - self.latest_fs_ts
+                   if self.latest_fs is not None else None)
             rgb = (self.latest_fs.rgb.copy()
                    if self.latest_fs is not None and age is not None
                        and age <= self._frame_max_age_s
                    else None)
-        return VlmContext(
-            user_command=cmd.text,
-            telemetry=telem,
-            scene=scene,
+        with self._instruction_lock:
+            instruction = self._instruction
+        return VlaContext(
+            instruction=instruction,
             rgb=rgb,
+            telemetry=telem,
             safety=dict(self.safety_snapshot),
-            telemetry_history=telem_hist,
-            mission=mission.to_dict() if mission is not None else None,
         )
 
+    # -- Tool dispatch --------------------------------------------------------
+
     def _bridge_offline(self) -> bool:
-        """True only after a dispatch has actually timed out and no later
-        reply has reset the flag."""
         with self._bridge_lock:
             return self._bridge_offline_flag
 
@@ -554,7 +309,6 @@ class Orchestrator:
                 s.setsockopt(zmq.SNDTIMEO, 3000)
                 s.connect(self.flight_req_endpoint)
             except Exception:
-                # Close the half-built socket on partial-construction failure.
                 try:
                     s.close(linger=0)
                 except Exception:
@@ -572,9 +326,6 @@ class Orchestrator:
             self._req_socket = None
 
     def _dispatch_tool_call(self, tc: ToolCall) -> ToolResult:
-        # Once the offline flag is set, fail the call immediately rather
-        # than wait out another REQ timeout. The flag clears on the first
-        # successful reply, so the next dispatch after recovery goes through.
         if self._bridge_offline():
             self.log.warning("tool %s rejected: bridge_offline", tc.name)
             self._publish_status("bridge_offline",
@@ -582,11 +333,18 @@ class Orchestrator:
             return ToolResult(request_id=tc.request_id, ok=False, error="bridge_offline")
 
         # voice_confirmed is the orchestrator's authoritative signal —
-        # overwrite unconditionally on arm so a VLM-hallucinated value
-        # can't bypass the bridge's spoken-arm gate.
+        # overwrite unconditionally on arm so a VLA-emitted value can't
+        # bypass the bridge's spoken-arm gate.
         args = dict(tc.args) if tc.args else {}
         if tc.name == "arm":
-            args["voice_confirmed"] = self._current_arm_authorized
+            with self._arm_authorized_lock:
+                args["voice_confirmed"] = self._arm_authorized
+        # Disarm clears the arm-authorization latch on the orchestrator
+        # side too (the bridge clears its own armed_with_voice via
+        # subscribe_armed; this keeps the two in step).
+        if tc.name == "disarm":
+            with self._arm_authorized_lock:
+                self._arm_authorized = False
 
         try:
             req = self._ensure_req_socket()
@@ -597,10 +355,6 @@ class Orchestrator:
             }).encode("utf-8"))
             reply = req.recv()
             data = json.loads(reply.decode("utf-8"))
-            # The bridge always replies with a JSON object, but a wire-level
-            # bug (or someone connecting another producer to the REP socket)
-            # could send a list/string. data.get on those raises
-            # AttributeError, which the catch-block widened.
             if not isinstance(data, dict):
                 raise TypeError(f"non-dict reply: {type(data).__name__}")
             result = ToolResult(
@@ -609,14 +363,12 @@ class Orchestrator:
                 error=data.get("error"),
                 data=data.get("data"),
             )
-            # Any reply (ok or error) means the bridge is alive; only
-            # timeouts leave _bridge_offline_flag set.
             with self._bridge_lock:
                 self._bridge_offline_flag = False
             if not result.ok:
                 self.log.warning("tool %s failed: %s", tc.name, result.error)
             else:
-                self.log.info("tool %s ok", tc.name)
+                self.log.debug("tool %s ok", tc.name)
             return result
         except zmq.error.Again:
             self.log.warning("tool %s timed out", tc.name)
@@ -627,8 +379,6 @@ class Orchestrator:
                                   f"{tc.name} timed out — bridge unreachable")
             return ToolResult(request_id=tc.request_id, ok=False, error="timeout")
         except zmq.ZMQError as e:
-            # Transport-level failure (wedged REQ state, ENOTCONN, ...).
-            # Flag offline so the next dispatch short-circuits at the gate.
             self.log.warning("tool %s zmq error: %r", tc.name, e)
             self._reset_req_socket()
             with self._bridge_lock:
@@ -656,14 +406,11 @@ class Orchestrator:
         try:
             self.status_pub.send(encode_header(msg))
         except zmq.ZMQError as e:
-            # Status PUB is non-load-bearing for control flow, but a
-            # send failure here means the TUI has stopped seeing us —
-            # surface rather than swallow.
             self.log.warning("status_pub send failed (%s): %r", e, msg)
 
 
 def cli() -> int:
-    p = argparse.ArgumentParser(description="Lexaire orchestrator")
+    p = argparse.ArgumentParser(description="Lexaire orchestrator (VLA)")
     p.add_argument("--config", help="path to config.yaml")
     args = p.parse_args()
 

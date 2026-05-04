@@ -8,9 +8,9 @@ find_package(MAVSDK REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
 # Wide-char ncurses (libncursesw) is required so the TUI renders any UTF-8
-# byte sequence — including Gemini-produced text in the orchestrator status
-# row — as proper glyphs instead of raw multi-byte garbage. setlocale() in
-# main() activates the byte-to-wchar pipeline.
+# byte sequence — including VLA-emitted thought text in the orchestrator
+# status row — as proper glyphs instead of raw multi-byte garbage.
+# setlocale() in main() activates the byte-to-wchar pipeline.
 set(CURSES_NEED_WIDE TRUE)
 find_package(Curses REQUIRED)
 find_package(yaml-cpp REQUIRED)

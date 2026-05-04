@@ -14,8 +14,8 @@ namespace {
 
 // `nlohmann::json::value(key, default)` returns the default when the key is
 // missing OR when the stored value can't be converted to the requested type.
-// That silently masks typos and wrong-typed args from the VLM (e.g. a
-// hallucinated "alt_m" on a takeoff would have triggered a 1.5 m takeoff
+// That silently masks typos and wrong-typed args from the VLA (e.g. a
+// hallucinated "vz" on a set_velocity_ned would have been read as 0.0
 // instead of erroring out). The helpers below give "either the value or a
 // clear error string" semantics so wrong types fail loud at the handler.
 
@@ -198,7 +198,7 @@ ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
 
 // ---- Operator-only handlers ----
 // The dispatch table includes the handlers below, but tool_schemas() in
-// python/services/orchestrator/tools.py does NOT, so the VLM can't reach
+// python/services/orchestrator/tools.py does NOT, so the VLA can't reach
 // them. They're the bridge's escape hatch for talking to the REQ socket
 // directly. Do not add to tool_schemas() without thinking through the
 // safety implications.

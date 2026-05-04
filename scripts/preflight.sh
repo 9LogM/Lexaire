@@ -39,18 +39,16 @@ section "Local config"
 ENV_FILE="$REPO_ROOT/.env"
 if [ -f "$ENV_FILE" ]; then
     ok ".env present"
-    if grep -Eq '^GEMINI_API_KEY=.+' "$ENV_FILE"; then
-        ok "GEMINI_API_KEY set in .env"
+    if grep -Eq '^DRONE_PI_IP=.+' "$ENV_FILE"; then
+        ok "DRONE_PI_IP set in .env"
     else
-        fail "GEMINI_API_KEY missing or empty in .env"
+        warn "DRONE_PI_IP missing or empty in .env (compose extra_hosts won't resolve drone.local)"
     fi
 else
-    # Fall back to the live process env — works when the script runs inside
-    # a container that received GEMINI_API_KEY via env_file or -e.
-    if [ -n "${GEMINI_API_KEY:-}" ]; then
-        warn ".env file not found at $ENV_FILE, but GEMINI_API_KEY is set in environment"
+    if [ -n "${DRONE_PI_IP:-}" ]; then
+        warn ".env file not found at $ENV_FILE, but DRONE_PI_IP is set in environment"
     else
-        fail ".env not found at $ENV_FILE and GEMINI_API_KEY not in environment"
+        warn ".env not found at $ENV_FILE — compose will use the :- fallback for DRONE_PI_IP"
     fi
 fi
 

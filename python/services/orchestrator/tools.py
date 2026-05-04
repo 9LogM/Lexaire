@@ -1,8 +1,13 @@
 """
-Tool schema exposed to the VLM. Mirrors the handler set in
+Tool schema exposed to the VLA. Mirrors the handler set in
 `src/flight_bridge/handlers.cpp` — keep the two in sync. Safety limits are
-enforced in the flight bridge; the VLM sees them as context, not as gates
+enforced in the flight bridge; the VLA sees them as context, not as gates
 it can negotiate.
+
+Pure-VLA action space: continuous velocity setpoints + a small set of
+discrete state transitions and emergency primitives. No `takeoff`,
+`goto_ned`, `return_to_launch`, or `hold` — those are emergent from
+velocity setpoints under closed-loop control.
 """
 
 from __future__ import annotations
@@ -24,61 +29,9 @@ def tool_schemas() -> list[dict[str, Any]]:
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
-            "name": "takeoff",
-            "description": "Take off to the given altitude (meters above home).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "altitude_m": {
-                        "type": "number",
-                        "description": "Target altitude AGL in meters. Must be <= safety.max_altitude_m.",
-                    },
-                },
-                "required": ["altitude_m"],
-            },
-        },
-        {
-            "name": "land",
-            "description": "Land in place at the current position.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "return_to_launch",
-            "description": "Return to the home position and land.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "hold",
-            "description": "Switch to HOLD — hover at the current position.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "goto_ned",
-            "description": (
-                "Fly to a position in the local NED (north-east-down) frame relative to home. "
-                "Negative `d` means above home (d = -height_m)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "n": {"type": "number", "description": "North offset, meters."},
-                    "e": {"type": "number", "description": "East offset, meters."},
-                    "d": {"type": "number", "description": "Down offset, meters (negative = above)."},
-                    "yaw_deg": {
-                        "type": "number",
-                        "description": (
-                            "Absolute heading in degrees (0=North, CW positive). "
-                            "Omit to hold current heading."
-                        ),
-                    },
-                },
-                "required": ["n", "e", "d"],
-            },
-        },
-        {
             "name": "set_velocity_ned",
             "description": (
-                "Command a NED velocity setpoint (m/s) for smooth motion. "
+                "Continuous control setpoint: NED-frame velocity (m/s). "
                 "At least one of vx/vy/vz must be set — the bridge rejects "
                 "a no-arg call to avoid silently stopping an active "
                 "autonomous mode. {vx:0, vy:0, vz:0} is a legitimate hover."
@@ -104,6 +57,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                     {"required": ["vz"]},
                 ],
             },
+        },
+        {
+            "name": "land",
+            "description": "Controlled landing in place (kept as a safety primitive).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
             "name": "abort",

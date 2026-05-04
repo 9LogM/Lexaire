@@ -24,7 +24,7 @@ COPY python/pyproject.toml ./
 COPY python/lexaire ./lexaire
 COPY python/services ./services
 
-RUN pip install -e ".[gemini,detector-yolo,stt-whisper]" \
+RUN pip install -e ".[detector-yolo,stt-whisper]" \
     && pip uninstall -y opencv-python opencv-python-headless \
     && pip install --no-cache-dir opencv-python-headless
 
