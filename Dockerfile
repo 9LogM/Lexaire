@@ -6,7 +6,7 @@ ARG MAVSDK_VERSION=3.17.0
 
 RUN apt-get update && apt-get install -y \
     wget cmake build-essential pkg-config \
-    libboost-all-dev libncurses-dev \
+    libboost-system-dev libboost-filesystem-dev libncurses-dev \
     libyaml-cpp-dev libzmq3-dev nlohmann-json3-dev \
     ca-certificates curl gnupg openssh-client \
     && install -m 0755 -d /etc/apt/keyrings \
@@ -25,12 +25,17 @@ RUN echo "StrictHostKeyChecking accept-new" >> /etc/ssh/ssh_config
 
 WORKDIR /workspace
 
-COPY . .
-
+# Copy build inputs first so changes to README/python/scripts don't invalidate
+# the C++ build cache.
+COPY CMakeLists.txt ./
+COPY include ./include
+COPY src ./src
 RUN mkdir build && cd build && \
-    cmake .. && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j"$(nproc)"
 
+# Everything else (compose files, scripts, docs, python). Cheap to recopy.
+COPY . .
 RUN chmod +x /workspace/docker-entrypoint.sh
 
 ENTRYPOINT ["/workspace/docker-entrypoint.sh"]

@@ -68,36 +68,40 @@ class GeminiVLM(VLM):
 
         parts.append(self._build_prompt(ctx))
 
+        thought_parts: list[str] = []
+        calls: list[ToolCall] = []
+
         try:
             resp = self._client.models.generate_content(
                 model=self._model_name,
                 contents=parts,
                 config=self._config,
             )
+            # Cap at the first candidate — if candidate_count >1, alternates'
+            # tool_calls would concatenate and dispatch together.
+            for candidate in (getattr(resp, "candidates", []) or [])[:1]:
+                content = getattr(candidate, "content", None)
+                if content is None:
+                    continue
+                for part in getattr(content, "parts", []) or []:
+                    fn = getattr(part, "function_call", None)
+                    if fn is not None:
+                        args = dict(fn.args) if fn.args is not None else {}
+                        calls.append(ToolCall(
+                            request_id=self.new_request_id(),
+                            name=str(fn.name),
+                            args=args,
+                        ))
+                        continue
+                    text = getattr(part, "text", None)
+                    if text:
+                        thought_parts.append(str(text))
         except Exception as e:
             log.exception("Gemini call failed: %s", e)
-            return VlmDecision(thought=f"vlm_error: {e}", tool_calls=[])
-
-        thought_parts: list[str] = []
-        calls: list[ToolCall] = []
-
-        for candidate in getattr(resp, "candidates", []) or []:
-            content = getattr(candidate, "content", None)
-            if content is None:
-                continue
-            for part in getattr(content, "parts", []) or []:
-                fn = getattr(part, "function_call", None)
-                if fn is not None:
-                    args = dict(fn.args) if fn.args is not None else {}
-                    calls.append(ToolCall(
-                        request_id=self.new_request_id(),
-                        name=str(fn.name),
-                        args=args,
-                    ))
-                    continue
-                text = getattr(part, "text", None)
-                if text:
-                    thought_parts.append(str(text))
+            # str(e) on google-genai errors can include the request URL
+            # with the API-key tail; this string flows over the status
+            # PUB to the TUI. Publish only the class name.
+            return VlmDecision(thought=f"vlm_error: {type(e).__name__}", tool_calls=[])
 
         thought = " ".join(thought_parts).strip() or "(no text)"
         return VlmDecision(thought=thought, tool_calls=calls)
@@ -126,18 +130,44 @@ class GeminiVLM(VLM):
         telem = ctx.telemetry or {}
         safety = ctx.safety or {}
 
-        return (
+        # Compact recent telemetry trend — only the fields that matter for
+        # decision-making, downsampled to ~5 samples to keep the prompt small.
+        trend_keys = ("rel_alt_m", "ground_speed_mps", "battery_pct", "flight_mode", "armed")
+        history = ctx.telemetry_history or []
+        if len(history) > 5:
+            step = max(1, len(history) // 5)
+            history = history[::step]
+        trend = [
+            {k: h.get(k) for k in trend_keys if h.get(k) is not None}
+            for h in history
+        ]
+
+        parts = [
             "You are the pilot. Use the tools to satisfy the pilot's spoken command "
             "while respecting the safety envelope (the flight bridge enforces it "
-            "below you; ignore it at your peril).\n\n"
-            f"Pilot command: {ctx.user_command!r}\n\n"
-            f"Scene (local detector): {_json.dumps(scene_compact)}\n\n"
-            f"Telemetry: {_json.dumps({k: telem.get(k) for k in ('connected','armed','flight_mode','rel_alt_m','yaw_deg','ground_speed_mps')})}\n\n"
-            f"Safety envelope: {_json.dumps(safety)}\n\n"
+            "below you; ignore it at your peril).",
+            "",
+            f"Pilot command: {ctx.user_command!r}",
+            "",
+            f"Scene (local detector): {_json.dumps(scene_compact)}",
+            "",
+            f"Telemetry now: {_json.dumps({k: telem.get(k) for k in ('connected','armed','flight_mode','rel_alt_m','yaw_deg','ground_speed_mps','battery_pct')})}",
+        ]
+        if trend:
+            parts.append(f"Telemetry trend (oldest→newest): {_json.dumps(trend)}")
+        if ctx.mission:
+            parts.append(f"Active mission: {_json.dumps(ctx.mission)}")
+        parts.extend([
+            "",
+            f"Safety envelope: {_json.dumps(safety)}",
+            "",
             "If the command is ambiguous or unsafe, call `hold`. If the pilot says anything that "
             "sounds like an emergency stop, call `abort`. Otherwise, reason about the RGB frame "
-            "plus the scene list and emit the tool calls needed to satisfy the command."
-        )
+            "plus the scene list and emit the tool calls needed to satisfy the command. "
+            "When a mission is active, prefer one tool call per turn — you'll be re-prompted "
+            "after each call so you can react to the result before the next step.",
+        ])
+        return "\n".join(parts)
 
 
 _SYSTEM_PROMPT = (

@@ -15,6 +15,8 @@
 #include <string>
 #include <thread>
 
+#include "monitor.hpp"
+
 struct ServicesSnapshot {
     // Monotonic ns of last successful recv, or 0 if never.
     std::int64_t perception_last_ns = 0;
@@ -24,8 +26,12 @@ struct ServicesSnapshot {
     // One-line summaries from the most recent message on each channel.
     std::string perception_summary;
     std::string telemetry_summary;
-    std::string orch_state;     // "idle" | "thinking" | "executing" | "aborted"
+    // "idle" | "thinking" | "executing" | "aborted" | "abort_failed"
+    //  | "bridge_offline" | "vlm_error"
+    std::string orch_state;
     std::string orch_thought;
+
+    TelemetrySnapshot telemetry;
 
     // Last time the watcher itself checked in (helps diagnose a stuck thread).
     std::int64_t watcher_last_ns = 0;

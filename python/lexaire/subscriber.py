@@ -1,10 +1,10 @@
 """
 Sensor subscriber.
 
-Subscribes to the RGB and depth ZMQ publishers from the Pi, decodes each frame,
-and yields synchronized framesets joined on the librealsense sequence number.
-The Pi publishes color and depth from the same `pipeline.wait_for_frames()`
-so their sequence numbers align one-to-one.
+Subscribes to the RGB and depth ZMQ publishers configured in `sensor.channels`,
+decodes each frame, and yields synchronized framesets joined on the publisher's
+sequence number. The publisher must emit matching seq values for the rgb and
+depth frames captured together so the matcher can pair them one-to-one.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import zstandard as zstd
 from PIL import Image
 
 from . import messages as msg
+from . import transport
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class SensorSubscriber:
 
     def __init__(
         self,
+        ctx: zmq.Context,
         rgb_endpoint: str,
         depth_endpoint: str,
         *,
@@ -51,7 +53,7 @@ class SensorSubscriber:
         self.depth_ep = depth_endpoint
         self.buffer_size = buffer_size
 
-        self._ctx = zmq.Context.instance()
+        self._ctx = ctx
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._zdecomp = zstd.ZstdDecompressor()
@@ -92,60 +94,72 @@ class SensorSubscriber:
         except queue.Empty:
             return None
 
+    def get(self, timeout: float) -> Optional[Frameset]:
+        """Block up to `timeout` seconds for the next Frameset, None on timeout."""
+        try:
+            return self._out.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
     # -- Stream threads -------------------------------------------------------
 
-    def _subscribe(self, endpoint: str) -> zmq.Socket:
-        s = self._ctx.socket(zmq.SUB)
-        s.setsockopt(zmq.SUBSCRIBE, b"")
-        s.setsockopt(zmq.RCVHWM, 8)
-        s.setsockopt(zmq.LINGER, 0)
-        s.setsockopt(zmq.CONNECT_TIMEOUT, 1000)
-        s.connect(endpoint)
-        return s
-
     def _run_rgb(self) -> None:
-        sock = self._subscribe(self.rgb_ep)
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            events = dict(poller.poll(250))
-            if sock not in events:
-                continue
-            try:
-                hdr_bytes, payload = sock.recv_multipart(copy=False)
-                hdr = msg.decode_header(bytes(hdr_bytes))
-                img = np.asarray(Image.open(io.BytesIO(bytes(payload))).convert("RGB"))
-                bgr = img[..., ::-1].copy()
-            except Exception as e:
-                log.warning("rgb decode error: %s", e)
-                continue
-            with self._new_frame:
-                self._rgb_buf[int(hdr["seq"])] = (hdr, bgr)
-                self._trim_locked(self._rgb_buf)
-                self._new_frame.notify()
-        sock.close()
+        sock = transport.sub(self._ctx, self.rgb_ep, connect_timeout_ms=1000)
+        try:
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            while not self._stop.is_set():
+                events = dict(poller.poll(250))
+                if sock not in events:
+                    continue
+                try:
+                    hdr_bytes, payload = sock.recv_multipart(copy=False)
+                    hdr = msg.decode_header(bytes(hdr_bytes))
+                    # Context-managed open so PIL's lazy-load resources are
+                    # released eagerly under sustained ingest. The asarray
+                    # copy below is what keeps the pixels alive after close.
+                    with Image.open(io.BytesIO(bytes(payload))) as im:
+                        img = np.asarray(im.convert("RGB"))
+                    bgr = img[..., ::-1].copy()
+                    seq = int(hdr["seq"])
+                except Exception as e:
+                    log.warning("rgb decode error: %s", e)
+                    continue
+                with self._new_frame:
+                    self._rgb_buf[seq] = (hdr, bgr)
+                    self._trim_locked(self._rgb_buf)
+                    self._new_frame.notify()
+        finally:
+            sock.close()
 
     def _run_depth(self) -> None:
-        sock = self._subscribe(self.depth_ep)
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            events = dict(poller.poll(250))
-            if sock not in events:
-                continue
-            try:
-                hdr_bytes, payload = sock.recv_multipart(copy=False)
-                hdr = msg.decode_header(bytes(hdr_bytes))
-                raw = self._zdecomp.decompress(bytes(payload))
-                depth = np.frombuffer(raw, dtype="<u2").reshape(hdr["h"], hdr["w"])
-            except Exception as e:
-                log.warning("depth decode error: %s", e)
-                continue
-            with self._new_frame:
-                self._depth_buf[int(hdr["seq"])] = (hdr, depth)
-                self._trim_locked(self._depth_buf)
-                self._new_frame.notify()
-        sock.close()
+        sock = transport.sub(self._ctx, self.depth_ep, connect_timeout_ms=1000)
+        try:
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            while not self._stop.is_set():
+                events = dict(poller.poll(250))
+                if sock not in events:
+                    continue
+                try:
+                    hdr_bytes, payload = sock.recv_multipart(copy=False)
+                    hdr = msg.decode_header(bytes(hdr_bytes))
+                    raw = self._zdecomp.decompress(bytes(payload))
+                    # frombuffer returns a read-only view; .copy() makes
+                    # it writable for in-place masking by consumers.
+                    depth = (np.frombuffer(raw, dtype="<u2")
+                             .reshape(hdr["h"], hdr["w"])
+                             .copy())
+                    seq = int(hdr["seq"])
+                except Exception as e:
+                    log.warning("depth decode error: %s", e)
+                    continue
+                with self._new_frame:
+                    self._depth_buf[seq] = (hdr, depth)
+                    self._trim_locked(self._depth_buf)
+                    self._new_frame.notify()
+        finally:
+            sock.close()
 
     # -- Matching -------------------------------------------------------------
 
@@ -157,18 +171,24 @@ class SensorSubscriber:
         while not self._stop.is_set():
             with self._new_frame:
                 matched = self._try_match_locked()
+                if not matched:
+                    # Wait inside the lock — a notify between unlock and
+                    # wait would otherwise be lost.
+                    self._new_frame.wait(timeout=0.1)
+                    matched = self._try_match_locked()
             for fs in matched:
                 try:
                     self._out.put(fs, timeout=0.1)
                 except queue.Full:
-                    # downstream too slow; drop oldest
+                    # Drop oldest; sustained drops mean the consumer can't keep up.
                     try:
-                        self._out.get_nowait()
+                        dropped = self._out.get_nowait()
                         self._out.put_nowait(fs)
-                    except Exception:
-                        pass
-            with self._new_frame:
-                self._new_frame.wait(timeout=0.1)
+                        log.warning("frameset queue full; dropped seq=%d for seq=%d",
+                                    dropped.seq, fs.seq)
+                    except (queue.Empty, queue.Full) as e:
+                        log.warning("frameset queue churn (seq=%d): %s; frame dropped",
+                                    fs.seq, e.__class__.__name__)
 
     def _try_match_locked(self) -> list[Frameset]:
         out: list[Frameset] = []
@@ -176,12 +196,31 @@ class SensorSubscriber:
         for seq in common:
             rgb_hdr, rgb = self._rgb_buf.pop(seq)
             depth_hdr, depth = self._depth_buf.pop(seq)
-            out.append(Frameset(
-                ts_ns=int(rgb_hdr["ts_ns"]),
-                seq=seq,
-                rgb=rgb,
-                depth=depth,
-                depth_scale_m=float(depth_hdr.get("depth_scale_m") or 0.0),
-                intrinsics=rgb_hdr["intrinsics"],
-            ))
+            try:
+                # depth_scale_m: missing is 0.0 (detector.py reads that as
+                # "no depth"), literal 0.0 also valid; warn once on missing.
+                scale_raw = depth_hdr.get("depth_scale_m")
+                if scale_raw is None:
+                    if not getattr(self, "_warned_missing_depth_scale", False):
+                        log.warning(
+                            "depth header missing depth_scale_m; "
+                            "depth-derived xyz/distances will be 0 until the "
+                            "publisher emits this field"
+                        )
+                        self._warned_missing_depth_scale = True
+                    depth_scale_m = 0.0
+                else:
+                    depth_scale_m = float(scale_raw)
+                out.append(Frameset(
+                    ts_ns=int(rgb_hdr["ts_ns"]),
+                    seq=seq,
+                    rgb=rgb,
+                    depth=depth,
+                    depth_scale_m=depth_scale_m,
+                    intrinsics=rgb_hdr["intrinsics"],
+                ))
+            except (KeyError, ValueError, TypeError) as e:
+                # One malformed header shouldn't kill the matcher thread —
+                # drop the seq, log, keep matching subsequent frames.
+                log.warning("matcher skipping seq=%d: %s", seq, e)
         return out

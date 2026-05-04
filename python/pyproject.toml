@@ -19,9 +19,6 @@ dependencies = [
 gemini = [
     "google-genai>=1.0",
 ]
-perception = [
-    "opencv-python-headless>=4.10",
-]
 detector-yolo = [
     "ultralytics>=8.3",
 ]

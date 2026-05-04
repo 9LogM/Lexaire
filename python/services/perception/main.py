@@ -1,7 +1,7 @@
 """
 Perception service.
 
-Subscribes to the RGB and depth streams from the Pi-side L515 publisher,
+Subscribes to the RGB and depth streams from the Pi-side sensor publisher,
 throttles to `perception.tick_hz`, runs a detector on the latest
 synchronized frameset, and publishes a SceneHeader on
 `services.perception_scene_pub`. Provides a cheap, always-available scene
@@ -15,6 +15,8 @@ import argparse
 import dataclasses
 import signal
 import time
+
+import zmq
 
 from lexaire import logs, transport
 from lexaire.config import load_config
@@ -33,16 +35,22 @@ def cli() -> int:
     cfg = load_config(args.config)
     log = logs.configure("perception", cfg.get("logging.level", "INFO"))
 
-    tick_hz = float(cfg.get("perception.tick_hz", 2.0))
-    scene_pub_ep = cfg.get("services.perception_scene_pub", "tcp://127.0.0.1:6100")
+    # Clamp tick_hz: 0 would divide-by-zero below; negative is meaningless.
+    raw_tick = float(cfg.get("perception.tick_hz", 2.0))
+    tick_hz = max(raw_tick, 0.1)
+    if tick_hz != raw_tick:
+        log.warning("perception.tick_hz=%.2f clamped to %.2f", raw_tick, tick_hz)
+    scene_pub_ep = cfg.require("services.perception_scene_pub")
 
     detector = build_detector(cfg)
 
+    ctx = zmq.Context()
     sub = SensorSubscriber(
-        rgb_endpoint=cfg.sensor.channels.rgb,
-        depth_endpoint=cfg.sensor.channels.depth,
+        ctx,
+        rgb_endpoint=cfg.require("sensor.channels.rgb"),
+        depth_endpoint=cfg.require("sensor.channels.depth"),
     )
-    pub = transport.pub(scene_pub_ep)
+    pub = transport.pub(ctx, scene_pub_ep)
 
     stop = False
     def _stop(*_):
@@ -57,20 +65,37 @@ def cli() -> int:
     interval_s = 1.0 / tick_hz
     last_tick = 0.0
     latest_fs = None
+    latest_fs_ts = 0.0  # monotonic at write
+    # Without this gate, scene detections keep flowing with a frozen
+    # frame_seq after the publisher dies (mirrors the orchestrator's
+    # frame_max_age_s on its own RGB path).
+    frame_max_age_s = float(cfg.get("perception.frame_max_age_s", 2.0))
+    # --once bails after 10s with no frame so a missing publisher
+    # doesn't hang CI runs.
+    once_deadline = time.monotonic() + 10.0 if args.once else None
 
     try:
         while not stop:
+            # Drain to newest — one-per-tick against a faster publisher
+            # saturates the matcher's queue and lags YOLO behind real-time.
             fs = sub.get_nowait()
-            if fs is not None:
+            while fs is not None:
                 latest_fs = fs
+                latest_fs_ts = time.monotonic()
+                fs = sub.get_nowait()
 
             now = time.monotonic()
+            if once_deadline is not None and latest_fs is None and now >= once_deadline:
+                log.error("--once: no frame from publisher within 10s; exiting")
+                return 2
             if now - last_tick < interval_s:
                 time.sleep(min(interval_s - (now - last_tick), 0.05))
                 continue
             last_tick = now
 
             if latest_fs is None:
+                continue
+            if now - latest_fs_ts > frame_max_age_s:
                 continue
 
             inp = DetectorInputs(
@@ -94,10 +119,16 @@ def cli() -> int:
             log.debug("scene ts_ns=%d seq=%d n=%d", header.ts_ns, header.frame_seq, len(header.detections))
 
             if args.once:
+                # transport.pub() sets LINGER=0 by default — fine for the
+                # streaming case where missing one frame doesn't matter,
+                # but for --once mode we need a graceful drain or the
+                # one-and-only frame can vanish on close.
+                pub.setsockopt(zmq.LINGER, 500)
                 break
     finally:
         sub.stop()
         pub.close()
+        ctx.term()
         log.info("perception shutdown")
     return 0
 

@@ -64,36 +64,63 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "n": {"type": "number", "description": "North offset, meters."},
                     "e": {"type": "number", "description": "East offset, meters."},
                     "d": {"type": "number", "description": "Down offset, meters (negative = above)."},
-                    "yaw_deg": {"type": "number", "description": "Heading, deg."},
+                    "yaw_deg": {
+                        "type": "number",
+                        "description": (
+                            "Absolute heading in degrees (0=North, CW positive). "
+                            "Omit to hold current heading."
+                        ),
+                    },
                 },
                 "required": ["n", "e", "d"],
             },
         },
         {
             "name": "set_velocity_ned",
-            "description": "Command a NED velocity setpoint (m/s) for smooth motion.",
+            "description": (
+                "Command a NED velocity setpoint (m/s) for smooth motion. "
+                "At least one of vx/vy/vz must be set — the bridge rejects "
+                "a no-arg call to avoid silently stopping an active "
+                "autonomous mode. {vx:0, vy:0, vz:0} is a legitimate hover."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "vx": {"type": "number", "description": "North velocity (m/s)."},
                     "vy": {"type": "number", "description": "East velocity (m/s)."},
                     "vz": {"type": "number", "description": "Down velocity (m/s); negative = ascend."},
-                    "yaw_rate_deg_s": {"type": "number", "description": "Yaw rate (deg/s)."},
+                    "yaw_deg": {
+                        "type": "number",
+                        "description": (
+                            "Absolute heading in degrees (0=North, CW positive). "
+                            "Omit to hold current heading."
+                        ),
+                    },
                 },
                 "required": [],
+                "anyOf": [
+                    {"required": ["vx"]},
+                    {"required": ["vy"]},
+                    {"required": ["vz"]},
+                ],
             },
         },
         {
             "name": "abort",
             "description": (
-                "Abort the current mission and kill the motors. Use only as an emergency — "
-                "this is the kill switch, not a 'stop gently' command."
+                "Safe stop: trigger an immediate controlled landing. Use this when the pilot "
+                "says 'abort'/'stop' or you detect an unsafe situation that needs the vehicle "
+                "on the ground now. This is the right tool for almost all emergencies."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
-            "name": "get_telemetry",
-            "description": "Return the current telemetry snapshot (position, attitude, mode, battery).",
+            "name": "kill",
+            "description": (
+                "Emergency motor-off: cuts power to the motors instantly. The drone falls. "
+                "Use ONLY when a controlled landing is unsafe (e.g. the drone is about to "
+                "strike a person and you must drop it now). For everything else, use `abort`."
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     ]

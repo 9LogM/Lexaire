@@ -23,10 +23,13 @@ straight to the abort tool without waiting on the VLM.
 from __future__ import annotations
 
 import argparse
+import re
 import signal
 import sys
 import threading
 import time
+
+import zmq
 
 from lexaire import logs, transport
 from lexaire.config import load_config
@@ -43,10 +46,22 @@ class SttService:
         # so text-mode runs don't waste seconds + GPU memory.
         self._whisper = None
 
-        self.abort_kw = cfg.get("stt.abort_keyword", "abort").lower().strip()
-        self.push = transport.push(cfg.get(
-            "services.orchestrator_command_pull", "tcp://127.0.0.1:6200"
-        ))
+        # Word-boundary so "laboratory"/"abortive" don't trip the abort flag.
+        # Empty/whitespace keyword would compile to `\b\b`, which matches
+        # every word boundary — every voice command would become is_abort.
+        abort_kw = cfg.get("stt.abort_keyword", "abort").strip()
+        if not abort_kw:
+            raise ValueError(
+                "stt.abort_keyword is empty/whitespace — would flag every "
+                "command as abort. Set a non-empty keyword in config.yaml."
+            )
+        self._abort_pattern = re.compile(
+            rf"\b{re.escape(abort_kw)}\b", re.IGNORECASE)
+        self._zmq = zmq.Context()
+        self.push = transport.push(self._zmq, cfg.require("services.orchestrator_command_pull"))
+        # Slow-joiner guard: PUSH/PULL on TCP needs the connect handshake
+        # to settle before send() crosses the wire.
+        time.sleep(self._CONNECT_GRACE_S)
 
     def _get_whisper(self):
         if self._whisper is not None:
@@ -65,6 +80,7 @@ class SttService:
     def stop(self):
         self.stop_event.set()
         self.push.close()
+        self._zmq.term()
 
     # -- Send -----------------------------------------------------------------
 
@@ -72,7 +88,7 @@ class SttService:
         text = (text or "").strip()
         if not text:
             return False
-        is_abort = self.abort_kw in text.lower()
+        is_abort = bool(self._abort_pattern.search(text))
         cmd = VoiceCommand(ts_ns=now_ns(), text=text, is_abort=is_abort)
         self.push.send(encode_header(cmd))
         self.log.info("-> %s%s", text, "  [ABORT]" if is_abort else "")
@@ -80,13 +96,12 @@ class SttService:
 
     # -- Modes ----------------------------------------------------------------
 
+    # Slow-joiner grace applied once in __init__; LINGER on close handles
+    # the post-send side.
+    _CONNECT_GRACE_S = 0.15
+
     def run_once(self, text: str) -> int:
-        # Give PUSH a beat to finish connecting before we send + exit, otherwise
-        # a fresh one-shot process can drop the message during teardown.
-        time.sleep(0.15)
         self.send(text)
-        # And a short hold so the LINGER drain window has time to run.
-        time.sleep(0.2)
         return 0
 
     def run_audio_file(self, path: str) -> int:
@@ -99,9 +114,7 @@ class SttService:
             self.log.warning("whisper: no speech detected in %s", path)
             return 0
         self.log.info("whisper: %s", text)
-        time.sleep(0.15)
         self.send(text)
-        time.sleep(0.2)
         return 0
 
     def run_file(self, path: str, interval_s: float) -> int:

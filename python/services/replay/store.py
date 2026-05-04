@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from typing import IO, Iterator
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,8 +60,13 @@ def write(fp: IO[str], rec: Record) -> None:
 
 def read_all(path: str) -> Iterator[Record]:
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            yield Record.from_line(line)
+            try:
+                yield Record.from_line(line)
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                # One bad line shouldn't kill the playback session.
+                log.warning("replay %s:%d: skipping malformed record: %s",
+                            path, lineno, e)

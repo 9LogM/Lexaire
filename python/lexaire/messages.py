@@ -4,23 +4,25 @@ Wire format between Lexaire services.
 All messages are ZMQ multipart. Frame 0 is a UTF-8 JSON header; frame 1, when
 present, is a binary payload.
 
-Channels:
+Channels (all sensor.* channels emit a 2-frame multipart so consumers
+can recv_multipart uniformly; IMU's payload frame is empty):
     sensor.rgb        PUB/SUB   header + jpeg bytes
     sensor.depth      PUB/SUB   header + zstd(z16 LE) bytes
-    sensor.imu        PUB/SUB   header + 3xf32 LE bytes
+    sensor.imu        PUB/SUB   header (accel + gyro samples in JSON) + empty
+    sensor.infrared   PUB/SUB   header + zstd(y8) bytes
+    sensor.confidence PUB/SUB   header + zstd(raw8) bytes
     perception.scene  PUB/SUB   header only (JSON contains the detection list)
     telemetry         PUB/SUB   header only
     orch.status       PUB/SUB   header only
     orch.command      PUSH/PULL header only  (STT -> orchestrator)
-    flight.tool       REQ/REP   header only
-    flight.result     REQ/REP   header only (reply to tool)
+    flight.toolcall   REQ/REP   ToolCall request -> ToolResult reply
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 
@@ -51,7 +53,11 @@ class VoiceCommand:
 class ToolCall:
     request_id: str
     name: str
-    args: dict
+    # Match the C++ side (lexaire/messages.hpp:ToolCall::from_json), which
+    # decodes a missing `args` field as an empty object. Without the default
+    # here, constructing a no-arg tool call (e.g. arm/disarm/abort/kill)
+    # would TypeError on the keyword.
+    args: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -65,9 +71,10 @@ class ToolResult:
 @dataclass
 class OrchestratorStatus:
     ts_ns: int
-    state: str                       # "idle" | "thinking" | "executing" | "aborted"
+    # "idle" | "thinking" | "executing" | "aborted" | "abort_failed"
+    #  | "bridge_offline" | "vlm_error"
+    state: str
     last_thought: str = ""
-    last_action: str = ""
 
 
 def now_ns() -> int:

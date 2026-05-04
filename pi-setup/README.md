@@ -1,6 +1,12 @@
 # pi-setup
 
-One-time infrastructure setup for a drone Pi, separate from the containerized services in `RS-L515-Docker/`.
+Pi-side bash scripts that the ground-station-side TUI pipes over SSH. Three live here:
+
+- `setup-ap.sh` — one-time AP-mode bring-up (operator runs once per Pi build, see below)
+- `deploy-publisher.sh` — sensor-publisher clone+up; called automatically by the TUI on launch and from the "Restart publisher" menu, never run manually
+- `check-publisher.sh` — sensor-publisher liveness probe; called automatically by the TUI on launch, never run manually
+
+The TUI bakes this directory into the lexaire image (Dockerfile `COPY . .`) and references the scripts at `/workspace/pi-setup/*.sh`. Edits here ship with the next image build.
 
 ## `setup-ap.sh`
 
@@ -9,7 +15,7 @@ Turns the Pi's `wlan0` into a WPA2 access point using NetworkManager (Pi OS Book
 Remote invocation (from the ground station) pipes the script over SSH so nothing needs pre-copying:
 
 ```bash
-ssh orbis@drone.lan "sudo bash -s" < pi-setup/setup-ap.sh
+ssh orbis@drone.local "sudo bash -s" < pi-setup/setup-ap.sh
 ```
 
 Overrides via env vars:

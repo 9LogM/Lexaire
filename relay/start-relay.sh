@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-SERIAL_DEVICE="${SERIAL_DEVICE}"
-SERIAL_BAUD="${SERIAL_BAUD}"
+# These come from compose env (DOCKER_HOST=ssh:// passes them through to
+# the Pi-side daemon). An empty value would write a half-broken
+# UartEndpoint config and mavlink-router would error opaquely on stdin.
+# Fail fast with a clear message instead.
+: "${SERIAL_DEVICE:?SERIAL_DEVICE must be set (passed from TUI/compose)}"
+: "${SERIAL_BAUD:?SERIAL_BAUD must be set (passed from TUI/compose)}"
+
 CONFIG="/tmp/lexaire-mlr.conf"
 
 cat > "$CONFIG" <<EOF

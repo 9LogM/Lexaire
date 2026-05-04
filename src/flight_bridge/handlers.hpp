@@ -5,15 +5,10 @@
 // Each handler takes a ToolCall (JSON args) and returns a ToolResult. The
 // flight bridge dispatches on ToolCall.name; the safety envelope has already
 // been enforced by the time a handler is invoked.
-//
-// In dummy mode, handlers log the requested action and return ok without
-// commanding the drone — useful for developing the orchestrator end-to-end
-// without a live aircraft.
 
 #include <memory>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 
 #include <mavsdk/mavsdk.h>
 #include <mavsdk/system.h>
@@ -35,7 +30,7 @@ struct FlightCtx {
     std::unique_ptr<mavsdk::Telemetry> telemetry;
     // Subscription handles — must outlive the ctx for callbacks to keep firing.
     mavsdk::Telemetry::StatusTextHandle status_text_handle{};
-    bool dummy = false;
+    mavsdk::Telemetry::ArmedHandle      armed_handle{};
     SafetyState* safety = nullptr;
 };
 

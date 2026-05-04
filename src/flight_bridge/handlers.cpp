@@ -1,9 +1,9 @@
 #include "handlers.hpp"
 
-#include <chrono>
 #include <cstdio>
+#include <optional>
 #include <string>
-#include <thread>
+#include <unordered_map>
 
 using namespace mavsdk;
 using lexaire::json;
@@ -11,6 +11,32 @@ using lexaire::json;
 namespace lexaire {
 
 namespace {
+
+// `nlohmann::json::value(key, default)` returns the default when the key is
+// missing OR when the stored value can't be converted to the requested type.
+// That silently masks typos and wrong-typed args from the VLM (e.g. a
+// hallucinated "alt_m" on a takeoff would have triggered a 1.5 m takeoff
+// instead of erroring out). The helpers below give "either the value or a
+// clear error string" semantics so wrong types fail loud at the handler.
+
+// Required numeric arg. ok=false on missing OR wrong type.
+struct DoubleArg { bool ok; double value; std::string error; };
+DoubleArg require_double(const json& args, const char* key) {
+    if (!args.contains(key)) return {false, 0.0, std::string("missing:") + key};
+    const auto& v = args[key];
+    if (!v.is_number())      return {false, 0.0, std::string("wrong_type:") + key};
+    return {true, v.get<double>(), ""};
+}
+
+// Optional numeric arg. ok=true with present=false when absent (caller
+// uses default). ok=false ONLY when present-but-wrong-typed.
+struct OptDoubleArg { bool ok; bool present; double value; std::string error; };
+OptDoubleArg optional_double(const json& args, const char* key) {
+    if (!args.contains(key)) return {true, false, 0.0, ""};
+    const auto& v = args[key];
+    if (!v.is_number())      return {false, false, 0.0, std::string("wrong_type:") + key};
+    return {true, true, v.get<double>(), ""};
+}
 
 std::string action_result_to_string(Action::Result r) {
     switch (r) {
@@ -66,68 +92,50 @@ ToolResult err(const std::string& req, const std::string& msg) {
 
 // ---- Individual handlers ----
 
-ToolResult handle_arm(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] arm\n"); return ok(c.request_id); }
+// Common body for arg-less Action plugin calls (arm/disarm/land/RTL/hold).
+// One thin handler per tool name (rather than a function template) keeps
+// the dispatch table's value type uniform: `ToolResult(*)(...)`.
+ToolResult call_action_method(const ToolCall& c, FlightCtx& ctx,
+                                Action::Result (Action::*method)() const) {
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->arm();
+    auto r = (ctx.action.get()->*method)();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
 }
 
-ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] disarm\n"); return ok(c.request_id); }
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->disarm();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
+ToolResult handle_arm   (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::arm); }
+ToolResult handle_disarm(const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::disarm); }
+ToolResult handle_land  (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::land); }
+ToolResult handle_rtl   (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::return_to_launch); }
+ToolResult handle_hold  (const ToolCall& c, FlightCtx& ctx) { return call_action_method(c, ctx, &Action::hold); }
 
 ToolResult handle_takeoff(const ToolCall& c, FlightCtx& ctx) {
-    double alt = c.args.value("altitude_m", 1.5);
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] takeoff alt=%.2f\n", alt); return ok(c.request_id); }
+    auto alt = require_double(c.args, "altitude_m");
+    if (!alt.ok) return err(c.request_id, alt.error);
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    ctx.action->set_takeoff_altitude(static_cast<float>(alt));
+    ctx.action->set_takeoff_altitude(static_cast<float>(alt.value));
     auto r = ctx.action->takeoff();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
 }
 
-ToolResult handle_land(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] land\n"); return ok(c.request_id); }
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->land();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
-
-ToolResult handle_rtl(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] rtl\n"); return ok(c.request_id); }
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->return_to_launch();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
-
-ToolResult handle_hold(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] hold\n"); return ok(c.request_id); }
-    if (!ctx.action) return err(c.request_id, "action_not_initialized");
-    auto r = ctx.action->hold();
-    if (r == Action::Result::Success) return ok(c.request_id);
-    return err(c.request_id, action_result_to_string(r));
-}
-
 ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
-    double n = c.args.value("n", 0.0);
-    double e = c.args.value("e", 0.0);
-    double d = c.args.value("d", 0.0);
-    double yaw = c.args.value("yaw_deg", 0.0);
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] goto_ned n=%.2f e=%.2f d=%.2f yaw=%.1f\n", n, e, d, yaw);
-        return ok(c.request_id);
-    }
+    auto n = require_double(c.args, "n");
+    if (!n.ok) return err(c.request_id, n.error);
+    auto e = require_double(c.args, "e");
+    if (!e.ok) return err(c.request_id, e.error);
+    auto d = require_double(c.args, "d");
+    if (!d.ok) return err(c.request_id, d.error);
+    auto yaw = optional_double(c.args, "yaw_deg");
+    if (!yaw.ok) return err(c.request_id, yaw.error);
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
-    Offboard::PositionNedYaw p{static_cast<float>(n), static_cast<float>(e),
-                                 static_cast<float>(d), static_cast<float>(yaw)};
+    // PositionNedYaw has no "hold heading" sentinel — an absent yaw_deg
+    // without this default snaps to 0° (north) on every translate.
+    float yaw_deg = yaw.present
+        ? static_cast<float>(yaw.value)
+        : (ctx.telemetry ? ctx.telemetry->attitude_euler().yaw_deg : 0.0f);
+    Offboard::PositionNedYaw p{static_cast<float>(n.value), static_cast<float>(e.value),
+                                 static_cast<float>(d.value), yaw_deg};
     ctx.offboard->set_position_ned(p);
     auto r = ctx.offboard->start();
     if (r == Offboard::Result::Success || r == Offboard::Result::Busy) return ok(c.request_id);
@@ -135,56 +143,92 @@ ToolResult handle_goto_ned(const ToolCall& c, FlightCtx& ctx) {
 }
 
 ToolResult handle_set_velocity_ned(const ToolCall& c, FlightCtx& ctx) {
-    double vx = c.args.value("vx", 0.0);
-    double vy = c.args.value("vy", 0.0);
-    double vz = c.args.value("vz", 0.0);
-    double yr = c.args.value("yaw_rate_deg_s", 0.0);
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] set_velocity_ned vx=%.2f vy=%.2f vz=%.2f yr=%.1f\n", vx, vy, vz, yr);
-        return ok(c.request_id);
+    // At least one of vx/vy/vz must be PRESENT in the args. The check
+    // is "all three absent", not "all three zero" — an explicit
+    // {vx:0, vy:0, vz:0} is a legitimate hover setpoint the operator
+    // may want; the case we reject is the no-arg call that would
+    // accidentally override an active autonomous mode without intent.
+    auto vx = optional_double(c.args, "vx");
+    if (!vx.ok) return err(c.request_id, vx.error);
+    auto vy = optional_double(c.args, "vy");
+    if (!vy.ok) return err(c.request_id, vy.error);
+    auto vz = optional_double(c.args, "vz");
+    if (!vz.ok) return err(c.request_id, vz.error);
+    if (!vx.present && !vy.present && !vz.present) {
+        return err(c.request_id, "missing_velocity_component");
     }
+    auto yaw = optional_double(c.args, "yaw_deg");
+    if (!yaw.ok) return err(c.request_id, yaw.error);
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
-    Offboard::VelocityNedYaw v{static_cast<float>(vx), static_cast<float>(vy),
-                                 static_cast<float>(vz), static_cast<float>(yr)};
+    // Default heading to current yaw when absent — see handle_goto_ned.
+    float yaw_deg = yaw.present
+        ? static_cast<float>(yaw.value)
+        : (ctx.telemetry ? ctx.telemetry->attitude_euler().yaw_deg : 0.0f);
+    Offboard::VelocityNedYaw v{static_cast<float>(vx.value), static_cast<float>(vy.value),
+                                 static_cast<float>(vz.value), yaw_deg};
     ctx.offboard->set_velocity_ned(v);
     auto r = ctx.offboard->start();
     if (r == Offboard::Result::Success || r == Offboard::Result::Busy) return ok(c.request_id);
     return err(c.request_id, offboard_result_to_string(r));
 }
 
+// Pilot-voice safe-stop: controlled descent and disarm-on-touchdown.
+// For an instant motor-cut, see `handle_kill`.
 ToolResult handle_abort(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.safety) ctx.safety->aborted.store(true);
-    if (ctx.dummy) { std::fprintf(stderr, "[flight-bridge DUMMY] abort -> disarm\n"); return ok(c.request_id); }
     if (!ctx.action) return err(c.request_id, "action_not_initialized");
+    // Skip the latch on the ground — no armed falling-edge to clear it,
+    // so it would block the next legitimate arm with abort_active.
+    const bool in_air = ctx.telemetry && ctx.telemetry->in_air();
+    if (in_air && ctx.safety) ctx.safety->aborted.store(true);
+    auto r = ctx.action->land();
+    if (r == Action::Result::Success) return ok(c.request_id);
+    return err(c.request_id, action_result_to_string(r));
+}
+
+// Instant motor cut. Reserved for emergencies where a controlled descent
+// is unsafe (e.g. drone about to strike a person).
+ToolResult handle_kill(const ToolCall& c, FlightCtx& ctx) {
+    if (!ctx.action) return err(c.request_id, "action_not_initialized");
+    const bool in_air = ctx.telemetry && ctx.telemetry->in_air();
+    if (in_air && ctx.safety) ctx.safety->aborted.store(true);
     auto r = ctx.action->kill();
     if (r == Action::Result::Success) return ok(c.request_id);
     return err(c.request_id, action_result_to_string(r));
 }
 
-// Operator-only; not in tool_schemas() — the VLM cannot reach it.
+// ---- Operator-only handlers ----
+// The dispatch table includes the handlers below, but tool_schemas() in
+// python/services/orchestrator/tools.py does NOT, so the VLM can't reach
+// them. They're the bridge's escape hatch for talking to the REQ socket
+// directly. Do not add to tool_schemas() without thinking through the
+// safety implications.
+
 ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     std::string name = c.args.value("name", "");
     if (name.empty()) return err(c.request_id, "missing_param_name");
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] set_param %s\n", name.c_str());
-        return ok(c.request_id);
-    }
     if (!ctx.param) return err(c.request_id, "param_not_initialized");
 
+    // Use the typed helpers — a hallucinated `"int_value": "5"` would
+    // otherwise coerce to 0 via `args.value()` and silently zero the
+    // flight param.
     if (c.args.contains("int_value")) {
-        int v = c.args.value("int_value", 0);
-        auto r = ctx.param->set_param_int(name, v);
+        auto v = require_double(c.args, "int_value");
+        if (!v.ok) return err(c.request_id, v.error);
+        int iv = static_cast<int>(v.value);
+        auto r = ctx.param->set_param_int(name, iv);
         if (r == Param::Result::Success) {
-            std::fprintf(stderr, "[flight-bridge] set_param %s=%d ok\n", name.c_str(), v);
+            std::fprintf(stderr, "[flight-bridge] set_param %s=%d ok\n", name.c_str(), iv);
             return ok(c.request_id);
         }
         return err(c.request_id, "param_set_failed:" + param_result_to_string(r));
     }
     if (c.args.contains("float_value")) {
-        float v = c.args.value("float_value", 0.0f);
-        auto r = ctx.param->set_param_float(name, v);
+        auto v = require_double(c.args, "float_value");
+        if (!v.ok) return err(c.request_id, v.error);
+        float fv = static_cast<float>(v.value);
+        auto r = ctx.param->set_param_float(name, fv);
         if (r == Param::Result::Success) {
-            std::fprintf(stderr, "[flight-bridge] set_param %s=%g ok\n", name.c_str(), v);
+            std::fprintf(stderr, "[flight-bridge] set_param %s=%g ok\n", name.c_str(), fv);
             return ok(c.request_id);
         }
         return err(c.request_id, "param_set_failed:" + param_result_to_string(r));
@@ -192,36 +236,13 @@ ToolResult handle_set_param(const ToolCall& c, FlightCtx& ctx) {
     return err(c.request_id, "missing_value");
 }
 
-ToolResult handle_get_telemetry(const ToolCall& c, FlightCtx& ctx) {
-    if (!ctx.telemetry) return err(c.request_id, "telemetry_not_initialized");
-    auto pos = ctx.telemetry->position();
-    auto att = ctx.telemetry->attitude_euler();
-    auto vel = ctx.telemetry->velocity_ned();
-    json data = {
-        {"lat", pos.latitude_deg},
-        {"lon", pos.longitude_deg},
-        {"abs_alt_m", pos.absolute_altitude_m},
-        {"rel_alt_m", pos.relative_altitude_m},
-        {"roll_deg", att.roll_deg},
-        {"pitch_deg", att.pitch_deg},
-        {"yaw_deg", att.yaw_deg},
-        {"vn_mps", vel.north_m_s},
-        {"ve_mps", vel.east_m_s},
-        {"vd_mps", vel.down_m_s},
-        {"armed", ctx.telemetry->armed()},
-        {"flight_mode", flight_mode_to_string(ctx.telemetry->flight_mode())},
-    };
-    return ok(c.request_id, std::move(data));
-}
-
-// Seed a zero-velocity setpoint, enter OFFBOARD, and hold for >1s so PX4's
-// proof-of-life check passes before a follow-up arm.
+// Seeds a zero-velocity setpoint and enters OFFBOARD. MAVSDK keeps the
+// setpoint streaming at ~50 Hz from here. Returns immediately; PX4 needs
+// roughly a second of streamed setpoints before it'll accept a follow-up
+// arm, so the operator/orchestrator should retry on the first
+// command_denied if it races the mode transition.
 // Ref: docs.px4.io/main/en/flight_modes/offboard
 ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
-    if (ctx.dummy) {
-        std::fprintf(stderr, "[flight-bridge DUMMY] enable_offboard\n");
-        return ok(c.request_id);
-    }
     if (!ctx.offboard) return err(c.request_id, "offboard_not_initialized");
 
     Offboard::VelocityNedYaw zero{0.0f, 0.0f, 0.0f, 0.0f};
@@ -230,25 +251,28 @@ ToolResult handle_enable_offboard(const ToolCall& c, FlightCtx& ctx) {
     if (r != Offboard::Result::Success && r != Offboard::Result::Busy) {
         return err(c.request_id, "offboard_start_failed:" + offboard_result_to_string(r));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-    std::fprintf(stderr, "[flight-bridge] offboard active\n");
+    std::fprintf(stderr, "[flight-bridge] offboard initiated\n");
     return ok(c.request_id);
 }
 
 ToolResult handle_get_param(const ToolCall& c, FlightCtx& ctx) {
     std::string name = c.args.value("name", "");
     if (name.empty()) return err(c.request_id, "missing_param_name");
-    if (ctx.dummy) return err(c.request_id, "dummy_mode");
     if (!ctx.param) return err(c.request_id, "param_not_initialized");
     auto [r, v] = ctx.param->get_param_int(name);
     if (r == Param::Result::Success) {
         return ok(c.request_id, json{{"int_value", v}});
     }
+    // Only fall through on type mismatch — a timeout / connection error
+    // would otherwise be masked by the float retry.
+    if (r != Param::Result::WrongType) {
+        return err(c.request_id, "param_get_failed:" + param_result_to_string(r));
+    }
     auto [r2, v2] = ctx.param->get_param_float(name);
     if (r2 == Param::Result::Success) {
         return ok(c.request_id, json{{"float_value", v2}});
     }
-    return err(c.request_id, "param_get_failed:" + param_result_to_string(r));
+    return err(c.request_id, "param_get_failed:" + param_result_to_string(r2));
 }
 
 // Operator-only diagnostic: dump MAVSDK's pre-arm health flags.
@@ -281,7 +305,7 @@ ToolResult dispatch(const ToolCall& call, FlightCtx& ctx) {
         {"goto_ned",          &handle_goto_ned},
         {"set_velocity_ned",  &handle_set_velocity_ned},
         {"abort",             &handle_abort},
-        {"get_telemetry",     &handle_get_telemetry},
+        {"kill",              &handle_kill},
         {"set_param",         &handle_set_param},
         {"get_param",         &handle_get_param},
         {"get_health",        &handle_get_health},

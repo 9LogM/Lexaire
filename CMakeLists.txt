@@ -7,6 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(MAVSDK REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
+# Wide-char ncurses (libncursesw) is required so the TUI renders any UTF-8
+# byte sequence — including Gemini-produced text in the orchestrator status
+# row — as proper glyphs instead of raw multi-byte garbage. setlocale() in
+# main() activates the byte-to-wchar pipeline.
+set(CURSES_NEED_WIDE TRUE)
 find_package(Curses REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -16,7 +21,6 @@ pkg_check_modules(ZMQ REQUIRED libzmq)
 
 add_executable(lexaire
     src/main.cpp
-    src/monitor.cpp
     src/services_panel.cpp
 )
 
@@ -26,8 +30,9 @@ target_include_directories(lexaire PRIVATE
     ${ZMQ_INCLUDE_DIRS}
 )
 
+target_compile_options(lexaire PRIVATE -Wall -Wextra -Wpedantic)
+
 target_link_libraries(lexaire PRIVATE
-    MAVSDK::mavsdk
     Boost::system
     Threads::Threads
     ${CURSES_LIBRARIES}
@@ -40,13 +45,14 @@ target_link_libraries(lexaire PRIVATE
 add_executable(lexaire-flight-bridge
     src/flight_bridge/main.cpp
     src/flight_bridge/handlers.cpp
-    src/monitor.cpp
 )
 
 target_include_directories(lexaire-flight-bridge PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ZMQ_INCLUDE_DIRS}
 )
+
+target_compile_options(lexaire-flight-bridge PRIVATE -Wall -Wextra -Wpedantic)
 
 target_link_libraries(lexaire-flight-bridge PRIVATE
     MAVSDK::mavsdk

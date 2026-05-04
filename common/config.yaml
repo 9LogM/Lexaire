@@ -8,10 +8,35 @@ drone:
   mavsdk_udp:    udpout://drone.local:14551
 
 sensor:
+  # URL of the docker-based ZMQ sensor publisher. This is the only piece
+  # of publisher config the operator provides — the TUI clones this repo
+  # to ~/lexaire-publisher on the Pi at startup and brings it up there
+  # (mirrors the relay; see ensure_publisher_running in src/main.cpp).
+  # Subsequent launches `git fetch` and only rebuild the image when
+  # origin/HEAD actually moved (avoids needless SD-card writes).
+  # Changing this URL tears the old project down and re-clones.
+  #
+  # Any docker-based ZMQ publisher works as long as it binds the channels
+  # below with the matching encoding and has a top-level docker-compose
+  # file that `docker compose up -d` (and `--build` on first deploy) will
+  # accept. Default: Intel RealSense L515 (RGB + depth + IMU + IR +
+  # confidence). Swap freely: D435i, OAK-D, a synthetic publisher for
+  # SITL — config change, not a code change.
+  publisher_repo: https://github.com/9LogM/RS-L515-Docker
+
+  # ZMQ endpoint per stream. Leave a value blank to disable that channel
+  # — replay skips disabled streams; services that need a stream
+  # (perception requires rgb+depth) will fail at startup with a clear
+  # error if it's blank.
   channels:
-    rgb:   tcp://drone.local:5555
-    depth: tcp://drone.local:5556
-    imu:   tcp://drone.local:5557
+    # Live consumers: perception + orchestrator subscribe to rgb + depth.
+    # imu / infrared / confidence are published for replay capture and
+    # future SLAM consumers; no live service subscribes to them today.
+    rgb:        tcp://drone.local:5555    # color, JPEG-encoded
+    depth:      tcp://drone.local:5556    # z16, zstd-compressed
+    imu:        tcp://drone.local:5557    # accel + gyro samples (record-only)
+    infrared:   tcp://drone.local:5558    # y8, zstd-compressed (record-only)
+    confidence: tcp://drone.local:5559    # raw8 confidence map (record-only, L515-specific)
 
 perception:
   tick_hz: 2
@@ -36,10 +61,19 @@ stt:
   whisper_language:     null         # null = auto-detect, else ISO 639-1 code
 
 safety:
-  max_altitude_m:     5.0
-  geofence_radius_m:  10.0
-  max_velocity_mps:   1.5
-  require_spoken_arm: true
+  max_altitude_m:             5.0
+  geofence_radius_m:          10.0
+  max_velocity_mps:           1.5
+  require_spoken_arm:         true
+  # Bridge auto-action when MAVSDK autopilot heartbeat drops while armed.
+  heartbeat_loss_action:      rtl     # rtl | hold
+  heartbeat_loss_threshold_s: 2.0
+
+orchestrator:
+  # Telemetry ring-buffer depth (seconds of history retained for the VLM).
+  telemetry_history_seconds:  5.0
+  # Hard cap on a mission's re-prompt loop. Bounds Gemini calls per mission.
+  mission_max_steps:          10
 
 services:
   # Endpoints bound by the named service; everyone else connects.

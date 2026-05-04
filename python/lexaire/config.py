@@ -1,5 +1,5 @@
 """
-YAML config loader with dot-notation access and env-var resolution.
+YAML config loader with dot-notation access.
 
 Usage:
     cfg = load_config()           # finds common/config.yaml from cwd or repo root
@@ -7,8 +7,11 @@ Usage:
     cfg.perception.vlm.provider   # -> "gemini"
     cfg.get("safety.max_altitude_m", default=5.0)
 
-API keys and other secrets live in a gitignored .env file in the repo root.
-Fields whose name ends in `_env` are resolved to os.environ[value] before use.
+The loader also walks up to find a `.env` file and populates `os.environ`
+without overwriting existing values. Fields whose name ends in `_env`
+(e.g. `perception.vlm.api_key_env`) hold the env-var name; the consumer
+reads `os.environ[<value>]` itself — there is no automatic resolution
+at load time.
 """
 
 from __future__ import annotations
@@ -21,7 +24,10 @@ import yaml
 
 
 class _AttrDict(dict):
-    """dict that also allows attribute access. Nested dicts are wrapped lazily."""
+    """dict that also allows attribute access. Nested dicts are wrapped
+    eagerly by `_wrap` at load time, but direct `_AttrDict({...})`
+    construction skips that — the lazy-wrap below covers that path so
+    `_AttrDict({"a": {"b": 1}}).a.b` works."""
 
     def __getattr__(self, name: str) -> Any:
         try:
@@ -37,14 +43,24 @@ class _AttrDict(dict):
         self[name] = value
 
     def get(self, path: str, default: Any = None) -> Any:
-        """Dotted-path lookup with default."""
+        """Dotted-path lookup with default. YAML-null is treated as missing
+        so commenting out a value line falls back to the default rather
+        than crashing downstream casts (float(None) etc.)."""
         cur: Any = self
         for part in path.split("."):
             if isinstance(cur, dict) and part in cur:
                 cur = cur[part]
             else:
                 return default
-        return cur
+        return cur if cur is not None else default
+
+    def require(self, path: str) -> Any:
+        """Dotted-path lookup that raises if the key is missing or null."""
+        sentinel = object()
+        v = self.get(path, sentinel)
+        if v is sentinel or v is None:
+            raise KeyError(f"required config key missing: {path!r}")
+        return v
 
 
 def _wrap(obj: Any) -> Any:
@@ -62,7 +78,7 @@ def _find_config_path(override: str | None) -> Path:
             return p
         raise FileNotFoundError(f"config not found: {override}")
 
-    # Walk up from cwd looking for common/config.yaml (up to 5 levels).
+    # Walk up from cwd looking for common/config.yaml (up to 6 levels).
     cur = Path.cwd()
     for _ in range(6):
         candidate = cur / "common" / "config.yaml"
@@ -92,7 +108,11 @@ def _load_dotenv(start: Path) -> None:
                     continue
                 k, v = line.split("=", 1)
                 k = k.strip()
-                v = v.strip().strip('"').strip("'")
+                v = v.strip()
+                # Only strip quotes when both ends match — bare `.strip('"')`
+                # would corrupt API keys like `foo'bar` or `"fooo`.
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':
+                    v = v[1:-1]
                 if k and k not in os.environ:
                     os.environ[k] = v
             return

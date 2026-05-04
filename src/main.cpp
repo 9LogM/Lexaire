@@ -1,15 +1,11 @@
-#include <iostream>
+#include <clocale>
+#include <fstream>
 #include <sstream>
 #include <memory>
-#include <atomic>
 #include <chrono>
 #include <functional>
 #include <string>
 
-#include <mavsdk/mavsdk.h>
-#include <mavsdk/system.h>
-#include <mavsdk/plugins/telemetry/telemetry.h>
-#include <mavsdk/log_callback.h>
 #include <boost/asio.hpp>
 #include <boost/process.hpp>
 
@@ -19,47 +15,59 @@
 #include "services_panel.hpp"
 #include "lexaire/config.hpp"
 
-using namespace mavsdk;
-
 // ── App state ─────────────────────────────────────────────────────────────────
 
 enum class State { MainMenu, SubMenu, Monitoring, Services };
+
+// Unknown = docker daemon unreachable (distinct from Down).
+// Deploying is set during in-flight startup commands.
+enum class ServiceState { Unknown, Down, Deploying, Up };
+
+// Spawned-process stderr goes here; inheriting it would paint over ncurses,
+// /dev/null would hide failures.
+constexpr const char* TUI_LOG_PATH = "/tmp/lexaire-tui.log";
+
+// Pi-side bash scripts are baked into the lexaire image at this path
+// (Dockerfile's `COPY . .` covers pi-setup/). The TUI pipes them over
+// SSH from here. Same convention as /workspace/scripts/preflight.sh.
+constexpr const char* PI_SETUP_DIR = "/workspace/pi-setup";
 
 struct AppContext {
     boost::asio::io_context      io;
     boost::asio::signal_set      signals;
     boost::asio::steady_timer    input_timer;
     boost::asio::steady_timer    render_timer;
+    boost::asio::steady_timer    refresh_timer;  // periodic re-render off the snapshot
     bool                         render_dirty = false;
 
-    std::shared_ptr<System>      system;
-    std::unique_ptr<Telemetry>   telemetry_plugin;
-
-    State        state         = State::MainMenu;
-    bool         qgc_connected = false;
-    bool         relay_active  = false;
-    bool         stack_active  = false;
+    State        state             = State::MainMenu;
+    ServiceState relay_state       = ServiceState::Unknown;
+    ServiceState publisher_state   = ServiceState::Unknown;
+    ServiceState stack_state       = ServiceState::Unknown;
     std::string  input_line;
     std::string  sub_content;
     std::string  drone_host;
     std::string  serial_device;
-    int          serial_baud   = 0;
-    std::string  scene_pub_ep;
-    std::string  telem_pub_ep;
-    std::string  orch_pub_ep;
-    std::shared_ptr<TelemetrySnapshot> telemetry_snap = std::make_shared<TelemetrySnapshot>();
+    int          serial_baud       = 0;
+    // Empty when sensor.publisher_repo is unset — auto-deploy is then
+    // skipped and the Pub: indicator stays in the Unknown state.
+    std::string  publisher_repo;
 
     std::unique_ptr<ServicesWatcher>  services_watcher;
-    boost::asio::steady_timer         services_tick;
-    std::shared_ptr<std::function<void()>> services_tick_fn;
 
-    explicit AppContext(std::shared_ptr<System> system)
-        : signals(io, SIGINT)
+    boost::asio::steady_timer    stack_timer;
+
+    AppContext()
+        : signals(io, SIGINT, SIGTERM)
         , input_timer(io)
         , render_timer(io)
-        , system(system)
-        , services_tick(io) {}
+        , refresh_timer(io)
+        , stack_timer(io) {}
 };
+
+static ServicesSnapshot current_snapshot(const AppContext& ctx) {
+    return ctx.services_watcher ? ctx.services_watcher->snapshot() : ServicesSnapshot{};
+}
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
 
@@ -72,37 +80,78 @@ static void draw_header(const AppContext& ctx) {
 
     mvprintw(1, 2, "LEXAIRE");
 
+    const ServicesSnapshot snap = current_snapshot(ctx);
+    const bool qgc_connected = snap.telemetry.qgc_connected;
+    const bool autopilot_link = snap.telemetry.connected;
+
     std::string qgc_label  = "QGC: ";
-    std::string qgc_status = ctx.qgc_connected ? "Connected" : "Disconnected";
+    std::string qgc_status = qgc_connected ? "Connected" : "Disconnected";
 
     int right = cols - (int)(qgc_label.size() + qgc_status.size()) - 2;
     mvprintw(1, right, "%s", qgc_label.c_str());
-    if (ctx.qgc_connected) attron(COLOR_PAIR(1) | A_BOLD);
-    else                   attron(COLOR_PAIR(2));
+    if (qgc_connected) attron(COLOR_PAIR(1) | A_BOLD);
+    else               attron(COLOR_PAIR(2));
     printw("%s", qgc_status.c_str());
     attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | A_BOLD);
 
-    bool heartbeat = ctx.system && ctx.system->is_connected();
-    std::string relay_label  = "Relay: ";
-    std::string relay_status = !ctx.relay_active    ? "Inactive"
-                             : heartbeat            ? "Active"
-                                                    : "No Heartbeat";
+    const bool heartbeat = autopilot_link;
+    std::string relay_label = "Relay: ";
+    std::string relay_status;
+    int relay_color = 3;
+    switch (ctx.relay_state) {
+        case ServiceState::Up:
+            relay_status = heartbeat ? "Active" : "No Heartbeat";
+            relay_color = heartbeat ? 1 : 3;
+            break;
+        case ServiceState::Deploying:
+            relay_status = "Deploying...";
+            relay_color = 2;
+            break;
+        case ServiceState::Down:
+            relay_status = "Inactive";
+            relay_color = 2;
+            break;
+        case ServiceState::Unknown:
+            // Daemon unreachable — diagnostics are in TUI_LOG_PATH.
+            relay_status = "Unknown";
+            relay_color = 3;
+            break;
+    }
     int relay_col = right - (int)(relay_label.size() + relay_status.size()) - 3;
     mvprintw(1, relay_col, "%s", relay_label.c_str());
-    if (!ctx.relay_active)       attron(COLOR_PAIR(2));
-    else if (heartbeat)          attron(COLOR_PAIR(1) | A_BOLD);
-    else                         attron(COLOR_PAIR(3) | A_BOLD);
+    attron(COLOR_PAIR(relay_color) | A_BOLD);
     printw("%s", relay_status.c_str());
-    attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | A_BOLD);
+    attroff(COLOR_PAIR(relay_color) | A_BOLD);
 
-    std::string stack_label  = "Stack: ";
-    std::string stack_status = ctx.stack_active ? "Up" : "Down";
-    int stack_col = relay_col - (int)(stack_label.size() + stack_status.size()) - 3;
+    std::string pub_label = "Pub: ";
+    std::string pub_status;
+    int pub_color = 3;
+    switch (ctx.publisher_state) {
+        case ServiceState::Up:        pub_status = "Active";      pub_color = 1; break;
+        case ServiceState::Deploying: pub_status = "Deploying..."; pub_color = 2; break;
+        case ServiceState::Down:      pub_status = "Inactive";    pub_color = 2; break;
+        case ServiceState::Unknown:   pub_status = "Unknown";     pub_color = 3; break;
+    }
+    int pub_col = relay_col - (int)(pub_label.size() + pub_status.size()) - 3;
+    mvprintw(1, pub_col, "%s", pub_label.c_str());
+    attron(COLOR_PAIR(pub_color) | A_BOLD);
+    printw("%s", pub_status.c_str());
+    attroff(COLOR_PAIR(pub_color) | A_BOLD);
+
+    std::string stack_label = "Stack: ";
+    std::string stack_status;
+    int stack_color = 3;
+    switch (ctx.stack_state) {
+        case ServiceState::Up:        stack_status = "Up";        stack_color = 1; break;
+        case ServiceState::Deploying: stack_status = "Starting..."; stack_color = 2; break;
+        case ServiceState::Down:      stack_status = "Down";      stack_color = 2; break;
+        case ServiceState::Unknown:   stack_status = "Unknown";   stack_color = 3; break;
+    }
+    int stack_col = pub_col - (int)(stack_label.size() + stack_status.size()) - 3;
     mvprintw(1, stack_col, "%s", stack_label.c_str());
-    if (ctx.stack_active) attron(COLOR_PAIR(1) | A_BOLD);
-    else                  attron(COLOR_PAIR(2));
+    attron(COLOR_PAIR(stack_color) | A_BOLD);
     printw("%s", stack_status.c_str());
-    attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | A_BOLD);
+    attroff(COLOR_PAIR(stack_color) | A_BOLD);
 
     attron(A_BOLD);
     mvhline(2, 0, '=', cols);
@@ -125,11 +174,13 @@ static void render(const AppContext& ctx) {
     draw_header(ctx);
 
     if (ctx.state == State::MainMenu) {
-        mvprintw(4, 2, ctx.relay_active ? "1. Stop relay" : "1. Start relay");
-        mvprintw(5, 2, ctx.stack_active ? "2. Stop GCS stack" : "2. Start GCS stack");
-        mvprintw(6, 2, "3. QGroundControl setup");
-        mvprintw(7, 2, "4. Live telemetry monitor");
-        mvprintw(8, 2, "5. Service status monitor");
+        mvprintw(4,  2, "1. Pre-flight check");
+        mvprintw(5,  2, "2. QGroundControl setup");
+        mvprintw(6,  2, "3. Live telemetry monitor");
+        mvprintw(7,  2, "4. Service status monitor");
+        mvprintw(8,  2, "5. Restart relay");
+        mvprintw(9,  2, "6. Restart publisher");
+        mvprintw(10, 2, "7. Restart GCS stack");
         attron(A_DIM);
         mvhline(rows - 3, 0, '-', cols);
         mvprintw(rows - 2, 2, "Ctrl+C to exit");
@@ -143,8 +194,17 @@ static void render(const AppContext& ctx) {
             mvprintw(row++, 0, "%s", line.c_str());
 
     } else if (ctx.state == State::Monitoring) {
-        const auto& s = *ctx.telemetry_snap;
+        const TelemetrySnapshot s = current_snapshot(ctx).telemetry;
         int r = 4;
+        if (!s.connected) {
+            attron(COLOR_PAIR(3) | A_BOLD);
+            mvprintw(r++, 4, "Autopilot link not present.");
+            attroff(COLOR_PAIR(3) | A_BOLD);
+            attron(A_DIM);
+            mvprintw(r++, 4, "Live telemetry will populate when the bridge connects to PX4.");
+            attroff(A_DIM);
+            r++;
+        }
 
         // Status
         attron(A_BOLD); mvprintw(r++, 2, "Status"); attroff(A_BOLD);
@@ -173,9 +233,9 @@ static void render(const AppContext& ctx) {
 
         // Attitude
         attron(A_BOLD); mvprintw(r++, 2, "Attitude"); attroff(A_BOLD);
-        mvprintw(r++, 4, "Roll        : %.1f°", s.roll_deg);
-        mvprintw(r++, 4, "Pitch       : %.1f°", s.pitch_deg);
-        mvprintw(r++, 4, "Yaw         : %.1f°", s.yaw_deg);
+        mvprintw(r++, 4, "Roll        : %.1f deg", s.roll_deg);
+        mvprintw(r++, 4, "Pitch       : %.1f deg", s.pitch_deg);
+        mvprintw(r++, 4, "Yaw         : %.1f deg", s.yaw_deg);
         r++;
 
         // Speed
@@ -200,7 +260,7 @@ static void render(const AppContext& ctx) {
             return (now_ns_mono() - ts_ns) / 1'000'000;
         };
         auto fmt_age = [](long long ms) -> std::string {
-            if (ms < 0)       return "never";
+            if (ms < 0)       return "no data yet";
             if (ms > 10'000)  return "stale (>10s)";
             return std::to_string(ms) + " ms ago";
         };
@@ -216,12 +276,34 @@ static void render(const AppContext& ctx) {
         attron(A_BOLD); mvprintw(r++, 2, "Service status"); attroff(A_BOLD);
         r++;
 
-        auto row = [&](const char* name, long long ms, const std::string& detail) {
+        // Column header — same column positions used by the row lambda below.
+        attron(A_BOLD | A_DIM);
+        mvprintw(r, 4,  "%-14s", "Service");
+        mvprintw(r, 20, "%-20s", "Last update");
+        mvprintw(r, 42, "%s",    "Current state");
+        attroff(A_BOLD | A_DIM);
+        r++;
+        attron(A_DIM);
+        mvprintw(r++, 4, "%s", std::string(70, '-').c_str());
+        attroff(A_DIM);
+
+        // Force the orchestrator row red on alarm states even if the
+        // orchestrator itself is publishing healthily.
+        const bool bridge_offline = (snap.orch_state == "bridge_offline");
+        const bool vlm_error     = (snap.orch_state == "vlm_error");
+        const bool abort_failed  = (snap.orch_state == "abort_failed");
+        const bool orch_alarm    = bridge_offline || vlm_error || abort_failed;
+
+        auto row = [&](const char* name, long long ms, const std::string& detail,
+                        int forced_pair = 0) {
+            const int pair = forced_pair ? forced_pair : status_pair(ms);
             mvprintw(r, 4, "%-14s", name);
-            attron(COLOR_PAIR(status_pair(ms)) | A_BOLD);
+            attron(COLOR_PAIR(pair) | A_BOLD);
             mvprintw(r, 20, "%-20s", fmt_age(ms).c_str());
-            attroff(COLOR_PAIR(status_pair(ms)) | A_BOLD);
-            mvprintw(r, 42, "%s", detail.c_str());
+            attroff(COLOR_PAIR(pair) | A_BOLD);
+            // An empty detail looks like a missing column; print "-" so the
+            // row reads cleanly when the service hasn't reported anything.
+            mvprintw(r, 42, "%s", detail.empty() ? "-" : detail.c_str());
             r++;
         };
 
@@ -229,14 +311,30 @@ static void render(const AppContext& ctx) {
         row("telemetry",     age_ms(snap.telemetry_last_ns),  snap.telemetry_summary);
         std::string orch_line = snap.orch_state;
         if (!snap.orch_thought.empty()) {
-            orch_line += " — ";
+            orch_line += " : ";
             orch_line += snap.orch_thought;
         }
-        row("orchestrator",  age_ms(snap.orch_last_ns),       orch_line);
+        row("orchestrator",  age_ms(snap.orch_last_ns),       orch_line,
+            orch_alarm ? 3 : 0);
+
+        if (bridge_offline) {
+            attron(COLOR_PAIR(3) | A_BOLD);
+            mvprintw(r++, 4, ">> FLIGHT BRIDGE OFFLINE - tool calls suspended");
+            attroff(COLOR_PAIR(3) | A_BOLD);
+        } else if (vlm_error) {
+            attron(COLOR_PAIR(3) | A_BOLD);
+            mvprintw(r++, 4, ">> VLM ERROR - check API key, quota, network");
+            attroff(COLOR_PAIR(3) | A_BOLD);
+        } else if (abort_failed) {
+            attron(COLOR_PAIR(3) | A_BOLD);
+            mvprintw(r++, 4, ">> ABORT REJECTED - drone may still be in air");
+            attroff(COLOR_PAIR(3) | A_BOLD);
+        }
 
         r++;
         attron(A_DIM);
-        mvprintw(r++, 4, "Watcher last tick: %s", fmt_age(age_ms(snap.watcher_last_ns)).c_str());
+        mvprintw(r++, 4, "Subscriber heartbeat: %s",
+                 fmt_age(age_ms(snap.watcher_last_ns)).c_str());
         attroff(A_DIM);
 
         attron(A_DIM);
@@ -265,6 +363,18 @@ static void start_render_loop(AppContext& ctx) {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
+// Forward decls for helpers defined alongside the deploy state machines
+// below — the menu cases in process_command consume them before the
+// definitions appear.
+static std::string publisher_deploy_cmd(const AppContext& ctx);
+static std::string relay_deploy_cmd(const AppContext& ctx);
+static void run_deploy(AppContext& ctx,
+                        ServiceState* state,
+                        const std::string& title,
+                        const std::string& progress,
+                        const std::string& shell_cmd,
+                        const std::string& ok_suffix);
+
 static void process_command(AppContext& ctx, const std::string& cmd) {
     if (ctx.state == State::MainMenu) {
         if (cmd.empty()) return;
@@ -274,28 +384,35 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
 
         switch (choice) {
             case 1: {
-                bool stopping = ctx.relay_active;
-                std::string shell_cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
-                    " SERIAL_DEVICE=" + ctx.serial_device +
-                    " SERIAL_BAUD=" + std::to_string(ctx.serial_baud) +
-                    (stopping
-                        ? " docker compose -f relay/docker-compose.yaml down"
-                        : " docker compose -f relay/docker-compose.yaml up -d --build") +
-                    " >/dev/null 2>&1";
-                ctx.sub_content = stopping
-                    ? "  STOP RELAY\n\n  Stopping...\n\n"
-                    : "  START RELAY\n\n  Deploying - this may take a few minutes on first run...\n\n";
+                const std::string out_file = "/tmp/lexaire-preflight.out";
+                std::string shell_cmd =
+                    "bash /workspace/scripts/preflight.sh > " + out_file +
+                    " 2>&1";
+                ctx.sub_content =
+                    "  PRE-FLIGHT CHECK\n\n"
+                    "  Running checks...\n\n";
                 ctx.state = State::SubMenu;
                 render(ctx);
                 boost::process::async_system(
                     ctx.io,
-                    [&ctx, stopping](boost::system::error_code, int rc) {
-                        if (rc == 0) ctx.relay_active = !stopping;
+                    [&ctx, out_file](boost::system::error_code, int rc) {
+                        std::ifstream f(out_file);
+                        std::stringstream ss;
+                        ss << f.rdbuf();
+                        std::string body = ss.str();
+                        if (body.empty()) {
+                            body =
+                                "  PRE-FLIGHT CHECK\n\n"
+                                "  Script produced no output. "
+                                "Verify scripts/preflight.sh exists and is executable.";
+                        }
+                        ctx.sub_content = body;
+                        ctx.sub_content += "\n\n  Exit code ";
+                        ctx.sub_content += std::to_string(rc);
                         ctx.sub_content += rc == 0
-                            ? (stopping ? "  Relay stopped." : "  Relay running.")
-                            : "  Failed (exit " + std::to_string(rc) + ").\n"
-                              "  Ensure companion computer has Docker running and SSH key is configured.";
-                        ctx.sub_content += "\n\n  Press Enter to return.";
+                            ? "  (passed)\n"
+                            : "  (blocked - fix [FAIL] entries above)\n";
+                        ctx.sub_content += "\n  Press Enter to return.";
                         render(ctx);
                     },
                     boost::process::shell, shell_cmd
@@ -303,31 +420,6 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 break;
             }
             case 2: {
-                bool stopping = ctx.stack_active;
-                std::string shell_cmd = stopping
-                    ? "docker compose down >/dev/null 2>&1"
-                    : "docker compose up -d --build >/dev/null 2>&1";
-                ctx.sub_content = stopping
-                    ? "  STOP GCS STACK\n\n  Stopping local services...\n\n"
-                    : "  START GCS STACK\n\n  Building and starting local services...\n\n";
-                ctx.state = State::SubMenu;
-                render(ctx);
-                boost::process::async_system(
-                    ctx.io,
-                    [&ctx, stopping](boost::system::error_code, int rc) {
-                        if (rc == 0) ctx.stack_active = !stopping;
-                        ctx.sub_content += rc == 0
-                            ? (stopping ? "  GCS stack stopped." : "  GCS stack running.")
-                            : "  Failed (exit " + std::to_string(rc) + ").\n"
-                              "  Check that Docker Desktop is running locally.";
-                        ctx.sub_content += "\n\n  Press Enter to return.";
-                        render(ctx);
-                    },
-                    boost::process::shell, shell_cmd
-                );
-                break;
-            }
-            case 3: {
                 std::string host = ctx.drone_host.substr(ctx.drone_host.find('@') + 1);
                 ctx.sub_content =
                     "  QGROUNDCONTROL SETUP\n\n"
@@ -340,75 +432,93 @@ static void process_command(AppContext& ctx, const std::string& cmd) {
                 render(ctx);
                 break;
             }
+            case 3: {
+                ctx.state = State::Monitoring;
+                render(ctx);
+                break;
+            }
             case 4: {
-                if (!ctx.system || !ctx.system->is_connected()) {
+                ctx.state = State::Services;
+                render(ctx);
+                break;
+            }
+            case 5: {
+                // Re-entry guard: deploy is async on the io_context, so
+                // a second press while one is in flight would spawn a
+                // parallel SSH session racing for the same build context.
+                if (ctx.relay_state == ServiceState::Deploying) {
                     ctx.sub_content =
-                        "  LIVE TELEMETRY\n\n"
-                        "  No drone connected.\n\n"
+                        "  RESTART RELAY\n\n"
+                        "  A deploy is already in progress. Wait for it\n"
+                        "  to finish before retrying.\n\n"
                         "  Press Enter to return.";
                     ctx.state = State::SubMenu;
                     render(ctx);
                     break;
                 }
-                ctx.state = State::Monitoring;
-                ctx.telemetry_snap = std::make_shared<TelemetrySnapshot>();
-                ctx.telemetry_plugin = std::make_unique<Telemetry>(ctx.system);
-                setup_monitoring(
-                    *ctx.telemetry_plugin,
-                    ctx.telemetry_snap,
-                    [&ctx]() {
-                        boost::asio::post(ctx.io, [&ctx]() { request_render(ctx); });
-                    }
-                );
-                ctx.system->subscribe_is_connected([&ctx](bool connected) {
-                    boost::asio::post(ctx.io, [&ctx, connected]() {
-                        if (!connected && ctx.state == State::Monitoring) {
-                            ctx.telemetry_plugin = nullptr;
-                            ctx.sub_content =
-                                "  LIVE TELEMETRY\n\n"
-                                "  Connection lost.\n\n"
-                                "  Press Enter to return.";
-                            ctx.state = State::SubMenu;
-                            request_render(ctx);
-                        }
-                    });
-                });
-                render(ctx);
+                run_deploy(ctx, &ctx.relay_state,
+                    "RESTART RELAY",
+                    "Redeploying - may take a few minutes if the image rebuilds...",
+                    relay_deploy_cmd(ctx),
+                    "  Relay redeployed.");
                 break;
             }
-            case 5: {
-                ctx.state = State::Services;
-                if (!ctx.services_watcher) {
-                    ctx.services_watcher = std::make_unique<ServicesWatcher>(
-                        ctx.scene_pub_ep, ctx.telem_pub_ep, ctx.orch_pub_ep);
-                    ctx.services_watcher->start();
+            case 6: {
+                // deploy-publisher.sh is smart-build aware — skips
+                // `--build` when origin/HEAD didn't move. Re-entry guard
+                // as in case 5; a second press would race the same
+                // ~/lexaire-publisher checkout on the Pi.
+                if (ctx.publisher_state == ServiceState::Deploying) {
+                    ctx.sub_content =
+                        "  RESTART PUBLISHER\n\n"
+                        "  A deploy is already in progress. Wait for it\n"
+                        "  to finish before retrying.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
                 }
-                // Periodic re-render so "N ms ago" ages update while the user
-                // watches. Store the recursive tick lambda on the context so
-                // it outlives this scope; capture weak to avoid a cycle.
-                ctx.services_tick_fn = std::make_shared<std::function<void()>>();
-                std::weak_ptr<std::function<void()>> weak = ctx.services_tick_fn;
-                *ctx.services_tick_fn = [&ctx, weak]() {
-                    if (ctx.state != State::Services) return;
-                    request_render(ctx);
-                    ctx.services_tick.expires_after(std::chrono::milliseconds(500));
-                    ctx.services_tick.async_wait(
-                        [weak](const boost::system::error_code& ec) {
-                            if (ec) return;
-                            auto self = weak.lock();
-                            if (self) (*self)();
-                        });
-                };
-                (*ctx.services_tick_fn)();
-                render(ctx);
+                if (ctx.publisher_repo.empty()) {
+                    ctx.sub_content =
+                        "  RESTART PUBLISHER\n\n"
+                        "  sensor.publisher_repo is not set in common/config.yaml.\n"
+                        "  Set it to a docker-based ZMQ publisher repo URL\n"
+                        "  (default: https://github.com/9LogM/RS-L515-Docker)\n"
+                        "  and try again.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
+                }
+                run_deploy(ctx, &ctx.publisher_state,
+                    "RESTART PUBLISHER",
+                    "Syncing with origin and rebuilding if needed - may take a few minutes...",
+                    publisher_deploy_cmd(ctx),
+                    "  Publisher redeployed.");
+                break;
+            }
+            case 7: {
+                if (ctx.stack_state == ServiceState::Deploying) {
+                    ctx.sub_content =
+                        "  RESTART GCS STACK\n\n"
+                        "  A restart is already in progress. Wait for it\n"
+                        "  to finish before retrying.\n\n"
+                        "  Press Enter to return.";
+                    ctx.state = State::SubMenu;
+                    render(ctx);
+                    break;
+                }
+                run_deploy(ctx, &ctx.stack_state,
+                    "RESTART GCS STACK",
+                    "Rebuilding and restarting local services...",
+                    std::string("docker compose up -d --build >>") + TUI_LOG_PATH + " 2>&1",
+                    "  GCS stack restarted.");
                 break;
             }
             default:
                 render(ctx);
         }
     } else {
-        ctx.telemetry_plugin = nullptr;
-        ctx.services_tick.cancel();
         ctx.state = State::MainMenu;
         render(ctx);
     }
@@ -456,31 +566,187 @@ static void start_input_poll(AppContext& ctx) {
 
 // ── Relay status (one-shot on startup) ───────────────────────────────────────
 
-static void check_relay_once(AppContext& ctx) {
-    std::string cmd = "DOCKER_HOST=ssh://" + ctx.drone_host +
-        " docker ps -q --filter name=lexaire-relay | grep -q .";
+// `docker ps -q` exits 0 with empty stdout when no match, so we have to
+// inspect output. Maps to: 0 = Up, 1 = Down, 2 = daemon unreachable.
+static std::string ps_query_shell(const std::string& env_prefix,
+                                   const std::string& filter_args) {
+    return env_prefix +
+        " out=$(docker ps -q " + filter_args + " 2>>" + TUI_LOG_PATH + ")"
+        " ; rc=$?"
+        " ; if [ \"$rc\" -ne 0 ]; then exit 2"
+        " ; elif [ -z \"$out\" ]; then exit 1"
+        " ; else exit 0"
+        " ; fi";
+}
+
+static ServiceState exit_to_state(int exit_code) {
+    if (exit_code == 0) return ServiceState::Up;
+    if (exit_code == 1) return ServiceState::Down;
+    return ServiceState::Unknown;
+}
+
+// Bash scripts in pi-setup/ are piped over SSH from the GCS, mirroring
+// pi-setup/setup-ap.sh.
+
+// `publisher_repo` comes from operator-editable YAML and gets interpolated
+// into a single-quoted shell argument. A literal "'" in the URL would
+// terminate the quoted block early and let shell parse the remainder. URLs
+// don't normally contain single quotes, but trust nothing from config —
+// escape with the standard '\'' (close-quote, escaped-quote, reopen-quote).
+static std::string shell_squote(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else           out += c;
+    }
+    return out;
+}
+
+static std::string publisher_deploy_cmd(const AppContext& ctx) {
+    return std::string("ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new ")
+        + "'" + shell_squote(ctx.drone_host) + "'"
+        + " 'bash -s -- " + shell_squote(ctx.publisher_repo) + "'"
+        + " < " + PI_SETUP_DIR + "/deploy-publisher.sh"
+        + " >>" + TUI_LOG_PATH + " 2>&1";
+}
+
+// Streamed via DOCKER_HOST=ssh:// — the lexaire image owns the relay
+// source, the Pi just gets the build context over SSH and runs it
+// natively. Used by both the startup auto-deploy (ensure_relay_running)
+// and the menu-triggered redeploy (case 5).
+static std::string relay_deploy_cmd(const AppContext& ctx) {
+    return "DOCKER_HOST='ssh://" + shell_squote(ctx.drone_host) + "'"
+        + " SERIAL_DEVICE='" + shell_squote(ctx.serial_device) + "'"
+        + " SERIAL_BAUD=" + std::to_string(ctx.serial_baud)
+        + " docker compose -f relay/docker-compose.yaml up -d --build"
+        + " >>" + TUI_LOG_PATH + " 2>&1";
+}
+
+// Common scaffolding for menu-triggered redeploys. Caller hands in the
+// state field to flip, the sub-view title and progress lines, the shell
+// command to run, and the success-suffix to append on rc==0. Failure
+// formatting (exit code + log path) is the same for every deploy so it
+// lives here.
+static void run_deploy(AppContext& ctx,
+                        ServiceState* state,
+                        const std::string& title,
+                        const std::string& progress,
+                        const std::string& shell_cmd,
+                        const std::string& ok_suffix) {
+    *state = ServiceState::Deploying;
+    ctx.sub_content = "  " + title + "\n\n  " + progress + "\n\n";
+    ctx.state = State::SubMenu;
+    render(ctx);
     boost::process::async_system(
         ctx.io,
-        [&ctx](boost::system::error_code, int exit_code) {
-            ctx.relay_active = (exit_code == 0);
-            request_render(ctx);
+        [&ctx, state, ok_suffix](boost::system::error_code, int rc) {
+            *state = (rc == 0) ? ServiceState::Up : ServiceState::Unknown;
+            ctx.sub_content += rc == 0
+                ? ok_suffix
+                : "  Failed (exit " + std::to_string(rc) + ").\n"
+                  "  See " + TUI_LOG_PATH + " for stderr.";
+            ctx.sub_content += "\n\n  Press Enter to return.";
+            render(ctx);
         },
-        boost::process::shell, cmd
+        boost::process::shell, shell_cmd
     );
 }
 
-static void check_stack_once(AppContext& ctx) {
-    // Any of the core GCS services up → stack is considered running. Ignores
-    // `lexaire` (build-only) and the `tools` profile entries.
+static std::string publisher_check_cmd(const AppContext& ctx) {
+    return std::string("ssh -o BatchMode=yes -o ConnectTimeout=5 ")
+        + "'" + shell_squote(ctx.drone_host) + "'"
+        + " 'bash -s'"
+        + " < " + PI_SETUP_DIR + "/check-publisher.sh"
+        + " >>" + TUI_LOG_PATH + " 2>&1";
+}
+
+static void ensure_publisher_running(AppContext& ctx) {
+    // No publisher_repo configured — nothing to deploy. State stays Unknown
+    // (its default); case 6 surfaces the actionable message if the operator
+    // hits "Restart publisher".
+    if (ctx.publisher_repo.empty()) return;
+    std::string check_cmd = publisher_check_cmd(ctx);
+    boost::process::async_system(
+        ctx.io,
+        [&ctx](boost::system::error_code, int check_rc) {
+            ctx.publisher_state = exit_to_state(check_rc);
+            if (ctx.publisher_state == ServiceState::Up) {
+                request_render(ctx);
+                return;
+            }
+            ctx.publisher_state = ServiceState::Deploying;
+            request_render(ctx);
+
+            std::string deploy_cmd = publisher_deploy_cmd(ctx);
+            boost::process::async_system(
+                ctx.io,
+                [&ctx](boost::system::error_code, int deploy_rc) {
+                    ctx.publisher_state = (deploy_rc == 0)
+                        ? ServiceState::Up
+                        : ServiceState::Unknown;
+                    request_render(ctx);
+                },
+                boost::process::shell, deploy_cmd
+            );
+        },
+        boost::process::shell, check_cmd
+    );
+}
+
+static void ensure_relay_running(AppContext& ctx) {
+    std::string check_cmd = ps_query_shell(
+        "DOCKER_HOST='ssh://" + shell_squote(ctx.drone_host) + "'",
+        "--filter name=lexaire-relay");
+    boost::process::async_system(
+        ctx.io,
+        [&ctx](boost::system::error_code, int check_rc) {
+            ctx.relay_state = exit_to_state(check_rc);
+            if (ctx.relay_state == ServiceState::Up) {
+                request_render(ctx);
+                return;
+            }
+            ctx.relay_state = ServiceState::Deploying;
+            request_render(ctx);
+
+            std::string deploy_cmd = relay_deploy_cmd(ctx);
+            boost::process::async_system(
+                ctx.io,
+                [&ctx](boost::system::error_code, int deploy_rc) {
+                    ctx.relay_state = (deploy_rc == 0)
+                        ? ServiceState::Up
+                        : ServiceState::Unknown;
+                    request_render(ctx);
+                },
+                boost::process::shell, deploy_cmd
+            );
+        },
+        boost::process::shell, check_cmd
+    );
+}
+
+static void refresh_stack_state(AppContext& ctx) {
+    // `docker ps --filter name=A --filter name=B` is OR, not AND, so a
+    // single multi-filter query would report Up whenever ANY of the three
+    // is running. Loop per-container and fail-fast on missing/unreachable.
+    // Exit codes match ps_query_shell's contract: 0 Up / 1 Down / 2 Unknown.
     std::string cmd =
-        "docker ps -q --filter name=lexaire-perception "
-        "--filter name=lexaire-orchestrator "
-        "--filter name=lexaire-flight-bridge | grep -q .";
+        " for n in lexaire-perception lexaire-orchestrator lexaire-flight-bridge; do"
+        "   out=$(docker ps -q --filter name=$n 2>>" + std::string(TUI_LOG_PATH) + ");"
+        "   rc=$?;"
+        "   if [ \"$rc\" -ne 0 ]; then exit 2; fi;"
+        "   if [ -z \"$out\" ]; then exit 1; fi;"
+        " done;"
+        " exit 0";
     boost::process::async_system(
         ctx.io,
         [&ctx](boost::system::error_code, int exit_code) {
-            ctx.stack_active = (exit_code == 0);
-            request_render(ctx);
+            const ServiceState next = exit_to_state(exit_code);
+            // Don't clobber a Deploying state mid-restart.
+            if (ctx.stack_state != ServiceState::Deploying) {
+                ctx.stack_state = next;
+                request_render(ctx);
+            }
         },
         boost::process::shell, cmd
     );
@@ -489,35 +755,28 @@ static void check_stack_once(AppContext& ctx) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main() {
-    mavsdk::log::subscribe([](mavsdk::log::Level, const std::string&, const std::string&, int) {
-        return true;
-    });
+    // Activate the wide-char pipeline before initscr() so ncurses (linked
+    // against libncursesw) decodes UTF-8 byte sequences into wide chars
+    // instead of stamping each byte as its own cell. C.UTF-8 is bundled
+    // with glibc and present in our Debian-slim base image, so no locale
+    // pre-generation is required at build or run time.
+    std::setlocale(LC_ALL, "C.UTF-8");
 
     auto config = lexaire::Config::load();
-    const std::string serial_device = config.require<std::string>("drone.serial_device");
-    const int         serial_baud   = config.require<int>("drone.serial_baud");
-    const std::string drone_host    = config.require<std::string>("drone.host");
-    const std::string drone_hostname = drone_host.substr(drone_host.find('@') + 1);
+    const std::string serial_device   = config.require<std::string>("drone.serial_device");
+    const int         serial_baud     = config.require<int>("drone.serial_baud");
+    const std::string drone_host      = config.require<std::string>("drone.host");
+    const std::string publisher_repo  = config.get_or<std::string>("sensor.publisher_repo", "");
 
-    const std::string connection = config.get_or<std::string>(
-        "drone.mavsdk_udp", "udpout://" + drone_hostname + ":14551");
-
-    const std::string scene_pub_ep = config.get_or<std::string>(
-        "services.perception_scene_pub", "tcp://127.0.0.1:6100");
-    const std::string telem_pub_ep = config.get_or<std::string>(
-        "services.telemetry_pub", "tcp://127.0.0.1:6101");
-    const std::string orch_pub_ep = config.get_or<std::string>(
-        "services.orchestrator_status_pub", "tcp://127.0.0.1:6102");
-
-    Mavsdk sdk{Mavsdk::Configuration{ComponentType::GroundStation}};
-    if (sdk.add_any_connection(connection) != ConnectionResult::Success) {
-        std::cerr << "Connection failed.\n";
-        return -1;
-    }
-
-    std::shared_ptr<System> system = nullptr;
+    const std::string scene_pub_ep = config.require<std::string>("services.perception_scene_pub");
+    const std::string telem_pub_ep = config.require<std::string>("services.telemetry_pub");
+    const std::string orch_pub_ep  = config.require<std::string>("services.orchestrator_status_pub");
 
     initscr();
+    // Restores the terminal even if io.run() throws.
+    struct EndwinGuard {
+        ~EndwinGuard() { endwin(); }
+    } endwin_guard;
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
@@ -529,50 +788,46 @@ int main() {
     init_pair(2, COLOR_YELLOW, -1);
     init_pair(3, COLOR_RED,    -1);
 
-    AppContext ctx(system);
-    ctx.drone_host    = drone_host;
-    ctx.serial_device = serial_device;
-    ctx.serial_baud   = serial_baud;
-    ctx.scene_pub_ep  = scene_pub_ep;
-    ctx.telem_pub_ep  = telem_pub_ep;
-    ctx.orch_pub_ep   = orch_pub_ep;
+    AppContext ctx;
+    ctx.drone_host     = drone_host;
+    ctx.serial_device  = serial_device;
+    ctx.serial_baud    = serial_baud;
+    ctx.publisher_repo = publisher_repo;
 
     ctx.signals.async_wait([&ctx](const boost::system::error_code&, int) {
-        endwin();
-        ctx.io.stop();
+        ctx.io.stop();  // EndwinGuard at scope exit restores the terminal.
     });
 
-    auto autopilot_found = std::make_shared<std::atomic<bool>>(false);
-    auto qgc_found = std::make_shared<std::atomic<bool>>(false);
-    sdk.subscribe_on_new_system([&sdk, &ctx, autopilot_found, qgc_found]() {
-        for (auto& sys : sdk.systems()) {
-            if (sys->has_autopilot() && !autopilot_found->exchange(true)) {
-                boost::asio::post(ctx.io, [&ctx, sys]() {
-                    ctx.system = sys;
-                    request_render(ctx);
-                });
-            }
-            if (!sys->has_autopilot() && !qgc_found->exchange(true)) {
-                boost::asio::post(ctx.io, [&ctx]() {
-                    ctx.qgc_connected = true;
-                    request_render(ctx);
-                });
-                sys->subscribe_is_connected([&ctx, qgc_found](bool connected) {
-                    boost::asio::post(ctx.io, [&ctx, connected, qgc_found]() {
-                        ctx.qgc_connected = connected;
-                        if (!connected) qgc_found->store(false);
-                        request_render(ctx);
-                    });
-                });
-            }
-        }
-    });
+    ctx.services_watcher = std::make_unique<ServicesWatcher>(
+        scene_pub_ep, telem_pub_ep, orch_pub_ep);
+    ctx.services_watcher->start();
 
-    check_relay_once(ctx);
-    check_stack_once(ctx);
+    std::function<void()> refresh_tick;
+    refresh_tick = [&ctx, &refresh_tick]() {
+        request_render(ctx);
+        ctx.refresh_timer.expires_after(std::chrono::milliseconds(500));
+        ctx.refresh_timer.async_wait(
+            [&refresh_tick](const boost::system::error_code& ec) {
+                if (!ec) refresh_tick();
+            });
+    };
+    refresh_tick();
+
+    // Slower than the 500ms render tick — docker ps every frame is wasteful.
+    std::function<void()> stack_tick;
+    stack_tick = [&ctx, &stack_tick]() {
+        refresh_stack_state(ctx);
+        ctx.stack_timer.expires_after(std::chrono::seconds(3));
+        ctx.stack_timer.async_wait(
+            [&stack_tick](const boost::system::error_code& ec) {
+                if (!ec) stack_tick();
+            });
+    };
+    stack_tick();
+
+    ensure_relay_running(ctx);
+    ensure_publisher_running(ctx);
     render(ctx);
     start_input_poll(ctx);
     ctx.io.run();
-
-    endwin();
 }

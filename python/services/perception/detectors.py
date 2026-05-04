@@ -39,6 +39,13 @@ def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
     if depth is None or depth.size == 0 or depth_scale_m <= 0.0:
         return None, None
 
+    # Original bbox center, NOT the clamped-patch center. For partial
+    # off-frame detections the patch is shrunken to image bounds; the
+    # ray we back-project should still point at where the object's
+    # actual center is, otherwise xyz drifts toward the image edge.
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+
     x0 = max(0, int(x))
     y0 = max(0, int(y))
     x1 = min(depth.shape[1], int(x + w))
@@ -54,13 +61,15 @@ def _center_depth_and_xyz(depth, depth_scale_m, intrinsics, x, y, w, h):
 
     fx = float(intrinsics.get("fx", 0.0))
     fy = float(intrinsics.get("fy", 0.0))
-    ppx = float(intrinsics.get("ppx", 0.0))
-    ppy = float(intrinsics.get("ppy", 0.0))
-    if fx <= 0 or fy <= 0:
+    ppx_raw = intrinsics.get("ppx")
+    ppy_raw = intrinsics.get("ppy")
+    # ppx/ppy at 0 would put the principal point in the corner and shift
+    # back-projected XYZ by ~half-frame; fail closed on missing.
+    if fx <= 0 or fy <= 0 or ppx_raw is None or ppy_raw is None:
         return z_m, None
+    ppx = float(ppx_raw)
+    ppy = float(ppy_raw)
 
-    cx = x0 + (x1 - x0) / 2.0
-    cy = y0 + (y1 - y0) / 2.0
     X = (cx - ppx) * z_m / fx
     Y = (cy - ppy) * z_m / fy
     return z_m, [X, Y, z_m]
@@ -101,7 +110,18 @@ class YoloDetector(Detector):
             missing = [c for c in classes if c not in name_to_id]
             if missing:
                 log.warning("YoloDetector: unknown classes ignored: %s", missing)
-            self._class_filter = wanted or None
+            # Empty `wanted` after filtering means EVERY requested class
+            # was a typo/unknown. The previous `wanted or None` collapsed
+            # this to "no filter" — silently emitting all classes, the
+            # opposite of what the operator configured. Fail loud instead.
+            if not wanted:
+                known = sorted(self._model.names.values())
+                raise ValueError(
+                    "perception.detector.classes: none of the requested "
+                    f"classes match the model's label set; got {classes!r}, "
+                    f"first known labels: {known[:8]}..."
+                )
+            self._class_filter = wanted
 
     def detect(self, inp: DetectorInputs) -> list[Detection]:
         # BGR (our convention) -> RGB for ultralytics.

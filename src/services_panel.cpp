@@ -67,21 +67,69 @@ std::string summarize_scene(const std::string& header) {
 std::string summarize_telemetry(const std::string& header) {
     try {
         auto j = nlohmann::json::parse(header);
-        bool connected = j.value("connected", false);
-        if (!connected) return "disconnected";
+        const bool connected = j.value("connected", false);
+        const std::string mode = j.value("flight_mode", "");
+
+        // The bridge exits at startup if no autopilot appears, so any
+        // !connected we see here is a heartbeat drop on a previously-up link.
+        if (!connected) return "autopilot heartbeat timeout";
 
         std::ostringstream ss;
-        ss << j.value("flight_mode", "?");
+        ss << mode;
         ss << " / " << (j.value("armed", false) ? "armed" : "disarmed");
         if (j.contains("rel_alt_m") && !j["rel_alt_m"].is_null()) {
             ss << " / " << j["rel_alt_m"].get<double>() << " m";
         }
         if (j.contains("battery_pct") && !j["battery_pct"].is_null()) {
-            ss << " / " << j["battery_pct"].get<int>() << "%";
+            // get<double>() tolerates both int and float without throwing.
+            ss << " / " << static_cast<int>(j["battery_pct"].get<double>()) << "%";
         }
         return ss.str();
     } catch (...) {
         return "parse error";
+    }
+}
+
+// Optional fields gate the has_* booleans so missing data renders as N/A
+// rather than zero.
+void parse_telemetry(const std::string& header, TelemetrySnapshot& out) {
+    out = TelemetrySnapshot{};
+    // .get<T>() still throws type_error on field-type drift even with
+    // allow_exceptions=false on parse().
+    try {
+        auto j = nlohmann::json::parse(header, nullptr, /*allow_exceptions*/ false);
+        if (!j.is_object()) return;
+
+        out.connected     = j.value("connected",     false);
+        out.qgc_connected = j.value("qgc_connected", false);
+        out.armed         = j.value("armed",         false);
+        out.flight_mode   = j.value("flight_mode",   std::string{"N/A"});
+
+        const bool has_pct = j.contains("battery_pct") && !j["battery_pct"].is_null();
+        const bool has_v   = j.contains("battery_v")   && !j["battery_v"].is_null();
+        out.has_battery = has_pct || has_v;
+        if (has_pct) out.battery_pct = static_cast<int>(j["battery_pct"].get<double>());
+        if (has_v)   out.battery_v   = j["battery_v"].get<float>();
+
+        if (j.contains("lat") && !j["lat"].is_null() &&
+            j.contains("lon") && !j["lon"].is_null()) {
+            out.has_fix   = true;
+            out.latitude  = j["lat"].get<double>();
+            out.longitude = j["lon"].get<double>();
+        }
+        if (j.contains("abs_alt_m") && !j["abs_alt_m"].is_null()) {
+            out.abs_alt_m = j["abs_alt_m"].get<float>();
+        }
+        if (j.contains("rel_alt_m") && !j["rel_alt_m"].is_null()) {
+            out.rel_alt_m = j["rel_alt_m"].get<float>();
+        }
+
+        out.roll_deg   = j.value("roll_deg",         0.0f);
+        out.pitch_deg  = j.value("pitch_deg",        0.0f);
+        out.yaw_deg    = j.value("yaw_deg",          0.0f);
+        out.ground_spd = j.value("ground_speed_mps", 0.0f);
+    } catch (...) {
+        out = TelemetrySnapshot{};
     }
 }
 
@@ -145,10 +193,11 @@ void ServicesWatcher::run() {
     void* telem = mksub(telem_ep_);
     void* orch  = mksub(orch_ep_);
 
+    // fd=-1 on null sockets so zmq_poll skips them; fd=0 would poll stdin.
     std::array<zmq_pollitem_t, 3> items{{
-        {scene, 0, ZMQ_POLLIN, 0},
-        {telem, 0, ZMQ_POLLIN, 0},
-        {orch,  0, ZMQ_POLLIN, 0},
+        {scene, scene ? 0 : -1, ZMQ_POLLIN, 0},
+        {telem, telem ? 0 : -1, ZMQ_POLLIN, 0},
+        {orch,  orch  ? 0 : -1, ZMQ_POLLIN, 0},
     }};
 
     while (!stop_.load(std::memory_order_relaxed)) {
@@ -169,9 +218,12 @@ void ServicesWatcher::run() {
         }
         if ((items[1].revents & ZMQ_POLLIN) && telem && recv_header_only(telem, hdr)) {
             auto summary = summarize_telemetry(hdr);
+            TelemetrySnapshot parsed;
+            parse_telemetry(hdr, parsed);
             std::lock_guard<std::mutex> lk(mu_);
             snap_.telemetry_last_ns = mono_ns();
             snap_.telemetry_summary = std::move(summary);
+            snap_.telemetry         = std::move(parsed);
         }
         if ((items[2].revents & ZMQ_POLLIN) && orch && recv_header_only(orch, hdr)) {
             auto [state, thought] = parse_orch(hdr);
