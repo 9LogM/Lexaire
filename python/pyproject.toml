@@ -16,9 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gemini = [
-    "google-genai>=1.0",
-]
+# Concrete VLA model deps go here when you pick one — e.g.:
+#   vla-openvla = ["transformers>=4.40", "torch>=2.2", ...]
 detector-yolo = [
     "ultralytics>=8.3",
 ]

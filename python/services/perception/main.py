@@ -5,8 +5,8 @@ Subscribes to the RGB and depth streams from the Pi-side sensor publisher,
 throttles to `perception.tick_hz`, runs a detector on the latest
 synchronized frameset, and publishes a SceneHeader on
 `services.perception_scene_pub`. Provides a cheap, always-available scene
-graph at a stable tick rate; the orchestrator may still reason on pixels
-directly via its own VLM.
+graph at a stable tick rate for the TUI and replay tooling. The
+orchestrator's VLA reasons on pixels directly and does not subscribe here.
 """
 
 from __future__ import annotations

@@ -39,7 +39,7 @@ Per-machine values (secrets and the Pi's IP) live in `.env`. Copy the example an
 
 ```bash
 cp .env.example .env
-# Edit .env: set GEMINI_API_KEY and DRONE_PI_IP
+# Edit .env: set DRONE_PI_IP
 ```
 
 ### Pi setup
@@ -144,7 +144,7 @@ Different mechanism (the publisher's source isn't on the GCS, so the build conte
 | Service | Source | Role |
 |---|---|---|
 | `perception` | [`python/services/perception/`](python/services/perception/) | Subscribes to the sensor publisher's RGB+depth streams, runs YOLO11 on each frame, publishes a scene graph (label + bbox + camera-frame xyz) at `perception.tick_hz`. |
-| `orchestrator` | [`python/services/orchestrator/`](python/services/orchestrator/) | Pulls voice commands from the STT service, fuses them with the latest scene + telemetry + RGB frame, calls the Gemini 2.5 Flash VLM for a tool-call decision, dispatches the calls to the flight bridge over REQ/REP. Owns the mission state machine and re-prompt loop. |
+| `orchestrator` | [`python/services/orchestrator/`](python/services/orchestrator/) | Pulls voice commands from the STT service, holds the operator's current instruction, and runs a continuous control loop: each tick it hands the latest RGB frame + telemetry + instruction to a VLA backend, gets back at most one tool call, and dispatches it to the flight bridge over REQ/REP. The VLA backend is pluggable (see [`python/services/orchestrator/vla.py`](python/services/orchestrator/vla.py)); default is a no-op until a model is wired in. |
 | `flight-bridge` (C++) | [`src/flight_bridge/`](src/flight_bridge/) | The system's only MAVSDK consumer. Enforces the non-overridable safety envelope ([`include/lexaire/safety.hpp`](include/lexaire/safety.hpp)) below the tool-call layer; runs the heartbeat-loss watchdog (auto RTL/HOLD); publishes telemetry + QGC liveness on the PUB stream the TUI reads. |
 | `stt` | [`python/services/stt/`](python/services/stt/) | Voice command source. Modes: text-input via stdin / `--once` / `--from-file`, or `--audio-file` for pre-recorded WAV (uses `faster-whisper`). Mic capture is a follow-up. Profile-gated: `docker compose --profile tools run --rm stt --once "land"`. |
 | `replay` | [`python/services/replay/`](python/services/replay/) | Field-debug tool: SUBs the live sensor channels and writes a JSONL recording (`record`), or replays one back as PUBs (`play`). Profile-gated. |
@@ -157,19 +157,19 @@ The sensor publisher (default: [`RS-L515-Docker`](https://github.com/9LogM/RS-L5
 ┌──────────────────────────────────────────────────────────────────────┐
 │                                                                      │
 │   STT ──── PUSH ────► orchestrator ──── REQ/REP ────► flight-bridge  │
-│   (voice)             │   ▲     ▲                       │            │
-│                       │   │     │                       │ MAVSDK     │
-│                       │  scene  telemetry               ▼            │
-│                       │   │     │                    autopilot       │
-│                       │  PUB   PUB                                   │
-│                       │   │     │                                    │
-│                       ▼   │     │                                    │
-│                    Gemini  │     │                                    │
-│                       (RGB)│     │                                    │
-│                            │     │                                    │
-│  L515 ──► perception ──────┘     │                                    │
-│                                  │                                    │
-│  flight-bridge ──────────────────┘                                    │
+│   (voice)                  │   ▲                        │            │
+│                            │   │                        │ MAVSDK     │
+│                            │  telemetry                 ▼            │
+│                            │   │                     autopilot       │
+│                            │  PUB                                    │
+│                            │   │                                     │
+│                            ▼   │                                     │
+│                          VLA   │                                     │
+│                       (RGB+lang)│                                    │
+│                                │                                     │
+│  L515 ──► perception ──────────┘                                     │
+│                                                                      │
+│  flight-bridge ──────────────────────────────────────────────────────│
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -180,15 +180,14 @@ Project-shared defaults live in [`common/config.yaml`](common/config.yaml); secr
 
 - `sensor.publisher_repo` — URL of the docker-based ZMQ sensor publisher repo. The TUI auto-clones it on the Pi and keeps it in sync with origin (default L515).
 - `sensor.channels.{rgb,depth,imu,infrared,confidence}` — ZMQ endpoints the publisher exposes. Each can be left blank to disable that stream; perception/orchestrator require `rgb` and `depth` and fail at startup if either is blank, replay subscribes to whichever are non-empty.
-- `perception.vlm.{provider,model,api_key_env,temperature}` — currently `gemini` with `gemini-2.5-flash`. Requires `GEMINI_API_KEY` in `.env`.
-- `perception.detector.{model,weights,score_threshold,...}` — YOLO11; `yolo11n.pt` is auto-downloaded on first run.
+- `perception.vla.{model_path,device}` — VLA backend to run inside the orchestrator. `model_path` left blank gives a no-op backend (control loop runs, no actions emitted) so the stack boots without a model. Wire your chosen VLA in [`python/services/orchestrator/vla.py`](python/services/orchestrator/vla.py).
+- `perception.detector.{model,weights,score_threshold,...}` — YOLO11; `yolo11n.pt` is auto-downloaded on first run. Detector output is observability-only under VLA mode (the orchestrator does not subscribe to scene messages).
 - `safety.{max_altitude_m,geofence_radius_m,max_velocity_mps,require_spoken_arm,heartbeat_loss_action,heartbeat_loss_threshold_s}` — non-overridable bridge-side gate plus heartbeat-loss recovery thresholds.
-- `orchestrator.{mission_max_steps,telemetry_history_seconds}` — mission re-prompt loop cap and telemetry ring-buffer depth fed to the VLM.
-- `stt.{abort_keyword,whisper_model,whisper_device,...}` — voice command settings; the abort keyword (default `"abort"`) short-circuits the VLM and goes straight to the abort tool.
+- `orchestrator.{control_hz,frame_max_age_s}` — VLA tick rate and the staleness gate that turns a missing/old RGB frame into an idle tick.
+- `stt.{abort_keyword,whisper_model,whisper_device,...}` — voice command settings; the abort keyword (default `"abort"`) short-circuits the VLA and goes straight to the abort tool.
 
 `.env` (copy from `.env.example`):
 
-- `GEMINI_API_KEY` — required when `perception.vlm.provider == "gemini"`.
 - `DRONE_PI_IP` — the Pi's IP address. Compose substitutes it into `extra_hosts` so every container resolves `drone.local`.
 
 ### Roadmap
@@ -196,7 +195,8 @@ Project-shared defaults live in [`common/config.yaml`](common/config.yaml); secr
 Lexaire ships in phases:
 
 - **Phase 1** — Perception + orchestrator + flight bridge end-to-end against a desk autopilot. ✅
-- **Phase 2** — First flight: multi-step missions, telemetry-aware reasoning, recovery on connection loss. See [`docs/phase-2.md`](docs/phase-2.md).
+- **Phase 2** — Safety + recovery shakedown: heartbeat watchdog, frame-staleness gate, voice-arm gate, abort drains the queue, telemetry-aware safety envelope. ✅
+- **VLA control loop** — Continuous-control orchestrator (RGB + held instruction → tool call at `orchestrator.control_hz`). Drop a model in [`python/services/orchestrator/vla.py`](python/services/orchestrator/vla.py).
 - **Phase 3** — Live microphone capture for STT.
 - **Phase 4** — RTAB-Map SLAM for persistent spatial memory ("go back to the table you saw earlier").
 

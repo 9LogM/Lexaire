@@ -1,6 +1,7 @@
 """
 Detectors emit a per-tick scene graph (label, bbox, depth, camera-frame xyz)
-that the orchestrator consumes alongside its own VLM reasoning.
+for observability. The orchestrator's VLA does not subscribe to scene
+messages — perception is independent and used by the TUI / replay tooling.
 
 Currently shipped: YoloDetector (Ultralytics YOLO11, COCO-80). Requires
 `pip install 'lexaire[detector-yolo]'`; downloads weights on first run.

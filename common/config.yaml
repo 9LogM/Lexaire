@@ -40,11 +40,16 @@ sensor:
 
 perception:
   tick_hz: 2
-  vlm:
-    provider:    gemini              # gemini
-    model:       gemini-2.5-flash
-    api_key_env: GEMINI_API_KEY
-    temperature: 0.2
+  vla:
+    # Path / repo / model identifier. The default backend is a no-op
+    # until you set this — orchestrator boots, control loop runs,
+    # but VLA emits no actions. See vla.py for backend wiring.
+    model_path:  null                # e.g. "openvla/openvla-7b" or a local checkpoint
+    device:      auto                # auto | cpu | cuda:0
+  # YOLO detector is independent of the orchestrator under VLA mode.
+  # The orchestrator no longer subscribes to scene messages; perception
+  # is kept as an opt-in observability service. Set tick_hz: 0 above
+  # to disable.
   detector:
     model:           yolo            # yolo
     weights:         yolo11n.pt      # n|s|m|l|x size vs. speed
@@ -70,10 +75,14 @@ safety:
   heartbeat_loss_threshold_s: 2.0
 
 orchestrator:
-  # Telemetry ring-buffer depth (seconds of history retained for the VLM).
-  telemetry_history_seconds:  5.0
-  # Hard cap on a mission's re-prompt loop. Bounds Gemini calls per mission.
-  mission_max_steps:          10
+  # Continuous control loop tick rate. The VLA is invoked at this rate;
+  # each invocation may emit at most one tool call (set_velocity_ned in
+  # the common case). Typical VLA models: 5-30 Hz.
+  control_hz:        10.0
+  # Frame staleness gate. The orchestrator serves rgb=None to the VLA
+  # if no fresh frame has arrived within this window — closed-loop
+  # control on a frozen frame is unsafe.
+  frame_max_age_s:   0.2
 
 services:
   # Endpoints bound by the named service; everyone else connects.

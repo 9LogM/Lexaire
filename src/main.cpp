@@ -290,9 +290,9 @@ static void render(const AppContext& ctx) {
         // Force the orchestrator row red on alarm states even if the
         // orchestrator itself is publishing healthily.
         const bool bridge_offline = (snap.orch_state == "bridge_offline");
-        const bool vlm_error     = (snap.orch_state == "vlm_error");
+        const bool vla_error     = (snap.orch_state == "vla_error");
         const bool abort_failed  = (snap.orch_state == "abort_failed");
-        const bool orch_alarm    = bridge_offline || vlm_error || abort_failed;
+        const bool orch_alarm    = bridge_offline || vla_error || abort_failed;
 
         auto row = [&](const char* name, long long ms, const std::string& detail,
                         int forced_pair = 0) {
@@ -321,9 +321,9 @@ static void render(const AppContext& ctx) {
             attron(COLOR_PAIR(3) | A_BOLD);
             mvprintw(r++, 4, ">> FLIGHT BRIDGE OFFLINE - tool calls suspended");
             attroff(COLOR_PAIR(3) | A_BOLD);
-        } else if (vlm_error) {
+        } else if (vla_error) {
             attron(COLOR_PAIR(3) | A_BOLD);
-            mvprintw(r++, 4, ">> VLM ERROR - check API key, quota, network");
+            mvprintw(r++, 4, ">> VLA ERROR - check model load, inference path");
             attroff(COLOR_PAIR(3) | A_BOLD);
         } else if (abort_failed) {
             attron(COLOR_PAIR(3) | A_BOLD);

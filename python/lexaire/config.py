@@ -4,14 +4,13 @@ YAML config loader with dot-notation access.
 Usage:
     cfg = load_config()           # finds common/config.yaml from cwd or repo root
     cfg.sensor.channels.rgb       # -> "tcp://drone.local:5555"
-    cfg.perception.vlm.provider   # -> "gemini"
+    cfg.perception.vla.model_path # -> None (no-op backend) or model id
     cfg.get("safety.max_altitude_m", default=5.0)
 
 The loader also walks up to find a `.env` file and populates `os.environ`
-without overwriting existing values. Fields whose name ends in `_env`
-(e.g. `perception.vlm.api_key_env`) hold the env-var name; the consumer
-reads `os.environ[<value>]` itself — there is no automatic resolution
-at load time.
+without overwriting existing values. Fields whose name ends in `_env` hold
+the env-var name; the consumer reads `os.environ[<value>]` itself — there
+is no automatic resolution at load time.
 """
 
 from __future__ import annotations
